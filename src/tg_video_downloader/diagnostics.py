@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 from tg_video_downloader.config import ConfigStore
 from tg_video_downloader.gateway import (
@@ -71,7 +72,6 @@ class Doctor:
         self._secrets: tuple[str, ...] = ()
 
     async def run(self) -> DiagnosticReport:
-        self.paths.ensure_directories()
         config_store = ConfigStore(self.paths)
         checks = [
             self._run_local("project_paths", self._check_project_paths),
@@ -132,14 +132,36 @@ class Doctor:
             return DiagnosticCheck(key, "fail", self._format_error(error))
 
     def _check_project_paths(self) -> DiagnosticCheck:
-        for directory in self.paths.writable_directories:
-            checked = self.paths.assert_within_root(directory)
-            checked.mkdir(parents=True, exist_ok=True)
-            probe = self.paths.assert_within_root(checked / ".doctor-write-test")
+        failures: list[str] = []
+        for directory in (self.paths.root, *self.paths.writable_directories):
+            probe: Path | None = None
             try:
-                probe.write_text("ok", encoding="ascii")
+                checked = self.paths.assert_within_root(directory)
+                checked.mkdir(parents=True, exist_ok=True)
+                probe = self.paths.assert_within_root(
+                    checked / f".doctor-write-test-{os.getpid()}-{uuid4().hex}"
+                )
+                with probe.open("x", encoding="ascii") as handle:
+                    handle.write("ok")
+            except Exception as error:
+                failures.append(
+                    f"{directory.name or directory}: {self._format_error(error)}"
+                )
             finally:
-                probe.unlink(missing_ok=True)
+                if probe is not None:
+                    try:
+                        probe.unlink(missing_ok=True)
+                    except Exception as error:
+                        failures.append(
+                            f"{directory.name or directory} 清理失败："
+                            f"{self._format_error(error)}"
+                        )
+        if failures:
+            return DiagnosticCheck(
+                "project_paths",
+                "fail",
+                "项目路径检查失败：" + "；".join(failures),
+            )
         return DiagnosticCheck("project_paths", "pass", "项目运行目录均位于项目内且可写")
 
     def _check_python(self) -> DiagnosticCheck:
@@ -209,9 +231,13 @@ class Doctor:
         return DiagnosticCheck("database", "pass", "SQLite quick_check 通过")
 
     def _check_heartbeat(self) -> DiagnosticCheck:
+        stop_requested = self.paths.stop_flag.exists()
         snapshot = HeartbeatWriter(self.paths.heartbeat).read()
         if not snapshot:
-            return DiagnosticCheck("heartbeat", "warning", "后台心跳尚未创建")
+            message = "后台心跳尚未创建"
+            if stop_requested:
+                message += "，项目内存在停止请求"
+            return DiagnosticCheck("heartbeat", "warning", message)
         status = str(snapshot.get("status", "unknown"))
         if status == "running":
             updated = datetime.fromisoformat(str(snapshot["updated_at"]))
@@ -219,13 +245,27 @@ class Doctor:
                 updated = updated.replace(tzinfo=UTC)
             age = (datetime.now(UTC) - updated.astimezone(UTC)).total_seconds()
             if age > 15:
+                suffix = "；项目内存在停止请求" if stop_requested else ""
                 return DiagnosticCheck(
                     "heartbeat",
                     "warning",
-                    f"后台心跳已停止更新 {age:.0f} 秒",
+                    f"后台心跳已停止更新 {age:.0f} 秒{suffix}",
+                )
+            if stop_requested:
+                return DiagnosticCheck(
+                    "heartbeat",
+                    "warning",
+                    "后台仍报告运行，但项目内已存在停止请求",
                 )
         if status in {"error", "needs_config", "needs_login"}:
-            return DiagnosticCheck("heartbeat", "warning", f"后台状态：{status}")
+            suffix = "；项目内存在停止请求" if stop_requested else ""
+            return DiagnosticCheck("heartbeat", "warning", f"后台状态：{status}{suffix}")
+        if stop_requested and status != "stopped":
+            return DiagnosticCheck(
+                "heartbeat",
+                "warning",
+                f"后台状态：{status}；项目内存在停止请求",
+            )
         return DiagnosticCheck("heartbeat", "pass", f"后台状态：{status}")
 
     async def _check_telegram(

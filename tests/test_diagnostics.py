@@ -55,7 +55,10 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
     assert report.exit_code == 0
     assert saved.resolve().is_relative_to(paths.root)
     assert saved.parent == paths.logs / "diagnostics"
-    assert json.loads(saved.read_text(encoding="utf-8"))["exit_code"] == 0
+    serialized = saved.read_text(encoding="utf-8")
+    assert json.loads(serialized)["exit_code"] == 0
+    assert group.title not in serialized
+    assert str(group.chat_id) not in serialized
     assert not saved.with_suffix(saved.suffix + ".tmp").exists()
     assert gateway.connected is False
 
@@ -99,3 +102,56 @@ async def test_database_failure_does_not_stop_remaining_checks(tmp_path: Path) -
     assert checks["database"].status == "fail"
     assert checks["telegram"].status == "pass"
     assert report.exit_code == 2
+
+
+@pytest.mark.asyncio
+async def test_project_path_failure_is_reported_without_aborting_other_checks(
+    tmp_path: Path,
+) -> None:
+    paths, _, group = configure_valid_project(tmp_path)
+    paths.downloads.rmdir()
+    paths.downloads.write_text("occupied", encoding="utf-8")
+    doctor = Doctor(
+        paths,
+        gateway_factory=lambda *_: FakeTelegramGateway({group.chat_id: []}),
+    )
+
+    report = await doctor.run()
+    checks = {item.key: item for item in report.checks}
+
+    assert checks["project_paths"].status == "fail"
+    assert checks["telegram"].status == "pass"
+    assert len(report.checks) == 9
+
+
+@pytest.mark.asyncio
+async def test_running_heartbeat_with_stop_request_is_a_warning(tmp_path: Path) -> None:
+    paths, _, group = configure_valid_project(tmp_path)
+    HeartbeatWriter(paths.heartbeat).write(
+        {"status": "running", "updated_at": datetime.now(UTC).isoformat()}
+    )
+    paths.stop_flag.write_text("stop\n", encoding="ascii")
+    doctor = Doctor(
+        paths,
+        gateway_factory=lambda *_: FakeTelegramGateway({group.chat_id: []}),
+    )
+
+    report = await doctor.run()
+    heartbeat = next(item for item in report.checks if item.key == "heartbeat")
+
+    assert heartbeat.status == "warning"
+    assert "停止" in heartbeat.message
+
+
+@pytest.mark.asyncio
+async def test_invisible_whitelisted_group_fails_online_check(tmp_path: Path) -> None:
+    paths, _, group = configure_valid_project(tmp_path)
+    doctor = Doctor(paths, gateway_factory=lambda *_: FakeTelegramGateway())
+
+    report = await doctor.run()
+    telegram = next(item for item in report.checks if item.key == "telegram")
+
+    assert telegram.status == "fail"
+    assert "1 个白名单群" in telegram.message
+    assert group.title not in telegram.message
+    assert str(group.chat_id) not in telegram.message
