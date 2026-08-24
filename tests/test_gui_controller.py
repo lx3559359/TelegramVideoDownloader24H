@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from tg_video_downloader.gateway import AuthenticationRequiredError
+from tg_video_downloader.diagnostics import DiagnosticCheck, DiagnosticReport
+from tg_video_downloader.gui.app import format_doctor_summary
 from tg_video_downloader.gui.controller import GuiController
 from tg_video_downloader.models import Credentials, GroupTarget
 from tg_video_downloader.observability import HeartbeatWriter
@@ -124,3 +126,51 @@ def test_stale_running_heartbeat_is_not_reported_as_healthy(tmp_path: Path) -> N
     assert snapshot["status"] == "stale"
     assert snapshot["reported_status"] == "running"
     assert "心跳" in str(snapshot["error"])
+
+
+@pytest.mark.asyncio
+async def test_run_doctor_returns_report_and_project_local_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, paths, _, _ = make_controller(tmp_path)
+    report = DiagnosticReport(
+        generated_at="2026-08-24T12:00:00+00:00",
+        checks=(DiagnosticCheck("paths", "pass", "ok"),),
+    )
+
+    class FakeDoctor:
+        def __init__(self, doctor_paths, gateway_factory) -> None:
+            assert doctor_paths is paths
+
+        async def run(self) -> DiagnosticReport:
+            return report
+
+        def save(self, value: DiagnosticReport) -> Path:
+            assert value is report
+            return paths.logs / "diagnostics" / "doctor.json"
+
+    monkeypatch.setattr("tg_video_downloader.gui.controller.Doctor", FakeDoctor)
+
+    result, saved = await controller.run_doctor()
+
+    assert result is report
+    assert saved.resolve().is_relative_to(paths.root)
+
+
+def test_format_doctor_summary_includes_all_outcome_counts() -> None:
+    report = DiagnosticReport(
+        generated_at="2026-08-24T12:00:00+00:00",
+        checks=(
+            DiagnosticCheck("a", "pass", "ok"),
+            DiagnosticCheck("b", "warning", "warn"),
+            DiagnosticCheck("c", "fail", "bad"),
+        ),
+    )
+
+    summary = format_doctor_summary(report, Path("logs/diagnostics/doctor.json"))
+
+    assert "通过：1" in summary
+    assert "警告：1" in summary
+    assert "失败：1" in summary
+    assert "doctor.json" in summary

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from tg_video_downloader.config import ConfigStore
+from tg_video_downloader.diagnostics import DiagnosticReport, Doctor
 from tg_video_downloader.gateway import AuthenticationRequiredError, TelegramGateway
 from tg_video_downloader.models import AppConfig, Credentials, GroupTarget
 from tg_video_downloader.observability import HeartbeatWriter
@@ -187,6 +188,11 @@ class GuiController:
 
     def stop(self) -> None:
         self.process_control.request_stop(self.paths)
+
+    async def run_doctor(self) -> tuple[DiagnosticReport, Path]:
+        doctor = Doctor(self.paths, self.gateway_factory)
+        report = await doctor.run()
+        return report, doctor.save(report)
 
     def read_status(self, *, now: datetime | None = None) -> dict[str, object]:
         snapshot = HeartbeatWriter(self.paths.heartbeat).read()

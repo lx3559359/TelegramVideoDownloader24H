@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import tkinter as tk
 from concurrent.futures import Future
+from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
 
+from tg_video_downloader.diagnostics import DiagnosticReport
 from tg_video_downloader.gateway import TelethonGateway
 from tg_video_downloader.gui.controller import AsyncBridge, GuiController
 from tg_video_downloader.models import Credentials, GroupTarget
@@ -128,6 +130,12 @@ class DownloaderApp(ttk.Frame):
             ttk.Button(actions, text=text, command=lambda fn=command: self._call_sync(fn)).pack(
                 side="left", padx=(0, 8)
             )
+        self.doctor_button = ttk.Button(
+            actions,
+            text="运行自检",
+            command=self._run_doctor,
+        )
+        self.doctor_button.pack(side="left")
 
         self.status_vars = {
             "status": tk.StringVar(value="stopped"),
@@ -137,6 +145,8 @@ class DownloaderApp(ttk.Frame):
             "pending_history": tk.StringVar(value="0"),
             "completed": tk.StringVar(value="0"),
             "retry_wait": tk.StringVar(value="0"),
+            "permanent_error": tk.StringVar(value="0"),
+            "last_error": tk.StringVar(value="-"),
         }
         labels = (
             ("运行状态", "status"),
@@ -146,6 +156,8 @@ class DownloaderApp(ttk.Frame):
             ("历史等待", "pending_history"),
             ("已完成", "completed"),
             ("等待重试", "retry_wait"),
+            ("永久失败", "permanent_error"),
+            ("最近错误", "last_error"),
         )
         grid = ttk.Frame(page)
         grid.pack(fill="x")
@@ -259,6 +271,18 @@ class DownloaderApp(ttk.Frame):
     def _stop_service(self) -> None:
         self._call_sync(self.controller.stop)
 
+    def _run_doctor(self) -> None:
+        def finished(result: tuple[DiagnosticReport, Path]) -> None:
+            report, saved = result
+            messagebox.showinfo("自检完成", format_doctor_summary(report, saved))
+            self._refresh_status()
+
+        self._run_async(
+            self.controller.run_doctor(),
+            self.doctor_button,
+            finished,
+        )
+
     def _call_sync(self, function) -> None:
         try:
             function()
@@ -297,9 +321,17 @@ class DownloaderApp(ttk.Frame):
             self.status_vars["status"].set(str(snapshot.get("status", "stopped")))
             self.status_vars["updated_at"].set(str(snapshot.get("updated_at", "-")))
             self.status_vars["current_file"].set(str(snapshot.get("current_file", "-")))
-            for key in ("pending_live", "pending_history", "completed", "retry_wait"):
+            for key in (
+                "pending_live",
+                "pending_history",
+                "completed",
+                "retry_wait",
+                "permanent_error",
+            ):
                 value = counts.get(key, 0) if isinstance(counts, dict) else 0
                 self.status_vars[key].set(str(value))
+            last_error = snapshot.get("error") or snapshot.get("config_error") or "-"
+            self.status_vars["last_error"].set(str(last_error))
             groups = snapshot.get("groups", [])
             lines = []
             if isinstance(groups, list):
@@ -338,6 +370,16 @@ class DownloaderApp(ttk.Frame):
         if self._status_after is not None:
             self.after_cancel(self._status_after)
         self.bridge.close()
+
+
+def format_doctor_summary(report: DiagnosticReport, saved: Path) -> str:
+    counts = report.counts
+    return (
+        f"通过：{counts['pass']}\n"
+        f"警告：{counts['warning']}\n"
+        f"失败：{counts['fail']}\n\n"
+        f"完整报告：{saved}"
+    )
 
 
 def run_gui(paths: ProjectPaths) -> None:
