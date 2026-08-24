@@ -22,7 +22,6 @@ if (-not (Test-Path -LiteralPath $ProjectPythonW)) {
 }
 
 Start-Process `
-    -WindowStyle Hidden `
     -FilePath $ProjectPythonW `
     -ArgumentList "-m", "tg_video_downloader", "gui" `
     -WorkingDirectory $ProjectRoot

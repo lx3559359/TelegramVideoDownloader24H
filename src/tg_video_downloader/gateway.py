@@ -146,6 +146,7 @@ class TelethonGateway:
             flood_sleep_threshold=60,
         )
         self._event_callback: Callable[[Any], Awaitable[None]] | None = None
+        self._password_required = False
 
     async def connect(self) -> None:
         try:
@@ -168,6 +169,7 @@ class TelethonGateway:
     async def send_login_code(self, phone: str) -> None:
         try:
             await self._client.send_code_request(phone)
+            self._password_required = False
         except Exception as error:
             raise _mapped_error(error) from error
 
@@ -177,15 +179,26 @@ class TelethonGateway:
         code: str,
         password: str | None = None,
     ) -> None:
+        if self._password_required:
+            if not password:
+                raise AuthenticationRequiredError("需要二步验证密码")
+            try:
+                await self._client.sign_in(password=password)
+            except Exception as password_error:
+                raise _mapped_error(password_error) from password_error
+            self._password_required = False
+            return
         try:
             await self._client.sign_in(phone=phone, code=code)
         except errors.SessionPasswordNeededError as error:
+            self._password_required = True
             if not password:
                 raise AuthenticationRequiredError("需要二步验证密码") from error
             try:
                 await self._client.sign_in(password=password)
             except Exception as password_error:
                 raise _mapped_error(password_error) from password_error
+            self._password_required = False
         except Exception as error:
             raise _mapped_error(error) from error
 

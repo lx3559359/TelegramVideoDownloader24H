@@ -30,6 +30,11 @@ def test_supervisor_is_hidden_stoppable_and_bounded() -> None:
     assert "300" in text
 
 
+def test_gui_launcher_does_not_hide_interactive_window() -> None:
+    text = (ROOT / "scripts" / "launch-gui.ps1").read_text(encoding="utf-8")
+    assert "-WindowStyle Hidden" not in text
+
+
 def test_double_click_entry_calls_gui_launcher() -> None:
     text = (ROOT / "打开配置器.cmd").read_text(encoding="utf-8")
     assert "scripts\\launch-gui.ps1" in text

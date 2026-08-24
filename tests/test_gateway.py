@@ -3,8 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telethon import errors
 
-from tg_video_downloader.gateway import TelethonGateway, normalize_message
+from tg_video_downloader.gateway import (
+    AuthenticationRequiredError,
+    TelethonGateway,
+    normalize_message,
+)
 from tg_video_downloader.models import Credentials, GroupTarget
 from tg_video_downloader.paths import ProjectPaths
 
@@ -109,3 +114,31 @@ async def test_list_groups_excludes_private_chats_and_sorts(tmp_path: Path) -> N
         "retry_delay": 5,
         "flood_sleep_threshold": 60,
     }
+
+
+@pytest.mark.asyncio
+async def test_two_step_password_retry_does_not_resubmit_code(tmp_path: Path) -> None:
+    class PasswordClient:
+        def __init__(self) -> None:
+            self.sign_in_calls = []
+
+        async def sign_in(self, **values) -> None:
+            self.sign_in_calls.append(values)
+            if "phone" in values:
+                raise errors.SessionPasswordNeededError(request=None)
+
+    client = PasswordClient()
+    gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path),
+        Credentials(12345, "hash", "+8613800000000"),
+        client_factory=lambda *args, **kwargs: client,
+    )
+
+    with pytest.raises(AuthenticationRequiredError, match="二步验证密码"):
+        await gateway.complete_login("+8613800000000", "123456")
+    await gateway.complete_login("+8613800000000", "123456", "two-factor")
+
+    assert client.sign_in_calls == [
+        {"phone": "+8613800000000", "code": "123456"},
+        {"password": "two-factor"},
+    ]
