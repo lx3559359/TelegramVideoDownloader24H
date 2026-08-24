@@ -9,6 +9,7 @@ class FakeTelegramGateway:
     def __init__(self, messages: dict[int, list[MessageInfo]] | None = None) -> None:
         self.messages = messages or {}
         self.download_payloads: dict[tuple[int, int], bytes] = {}
+        self.downloaded_keys: list[tuple[int, int]] = []
         self.iterated_chat_ids: list[int] = []
         self.handler = None
         self.authorized = True
@@ -75,6 +76,7 @@ class FakeTelegramGateway:
         message_id: int,
         destination: Path,
     ) -> Path:
+        self.downloaded_keys.append((chat_id, message_id))
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(self.download_payloads[(chat_id, message_id)])
         return destination
