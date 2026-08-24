@@ -1,1 +1,11 @@
 .worktrees/
+.venv/
+.cache/
+.tmp/
+.runtime/
+downloads/
+logs/
+config.toml
+__pycache__/
+*.py[cod]
+.pytest_cache/

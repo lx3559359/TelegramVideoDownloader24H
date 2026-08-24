@@ -1,0 +1,6 @@
+config_poll_seconds = 5
+prevent_sleep = true
+
+[[groups]]
+chat_id = -1001234567890
+title = "示例群（不会被自动启用）"
