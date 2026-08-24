@@ -189,6 +189,37 @@ async def test_hot_target_switch_keeps_existing_files_and_ignores_removed_group(
         state.close()
 
 
+@pytest.mark.asyncio
+async def test_reenabled_group_catches_up_only_the_missed_video(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    first = video(GROUP_A.chat_id, 1)
+    missed_payload = b"missed-video"
+    missed = video(GROUP_A.chat_id, 2, payload=missed_payload)
+    gateway = gateway_with({GROUP_A.chat_id: [first]})
+    state = StateStore(paths.database)
+    coordinator = ScannerCoordinator(state, gateway)
+    worker = DownloadWorker(paths, state, gateway)
+    try:
+        await coordinator.start((GROUP_A,))
+        await coordinator.scan_once(GROUP_A.chat_id)
+        assert await worker.run_one() == "completed"
+
+        await coordinator.apply_targets(())
+        gateway.messages[GROUP_A.chat_id].append(missed)
+        gateway.download_payloads[(missed.chat_id, missed.message_id)] = missed_payload
+
+        await coordinator.apply_targets((GROUP_A,))
+        assert await worker.run_one() == "completed"
+        assert await worker.run_one() == "idle"
+
+        assert build_final_path(paths, GROUP_A.title, missed).read_bytes() == missed_payload
+        assert gateway.downloaded_keys.count((GROUP_A.chat_id, missed.message_id)) == 1
+        assert state.counts()["completed"] == 2
+    finally:
+        state.close()
+
+
 def test_all_generated_paths_stay_inside_project_root(tmp_path: Path) -> None:
     paths = ProjectPaths.from_root(tmp_path)
     paths.ensure_directories()

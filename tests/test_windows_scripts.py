@@ -18,6 +18,8 @@ def test_powershell_scripts_keep_runtime_data_inside_project() -> None:
         assert "schtasks" not in lowered
         assert "\\startup" not in lowered
         assert "c:\\" not in lowered
+        assert "appdata" not in lowered
+        assert "userprofile" not in lowered
 
 
 def test_supervisor_is_hidden_stoppable_and_bounded() -> None:
