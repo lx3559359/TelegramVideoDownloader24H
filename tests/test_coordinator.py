@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from tg_video_downloader.coordinator import ScannerCoordinator
+from tg_video_downloader.gateway import GroupAccessError
 from tg_video_downloader.models import GroupTarget, MessageInfo
 from tg_video_downloader.state import StateStore
 from tests.fakes import FakeTelegramGateway
@@ -22,6 +23,31 @@ def make_video(chat_id: int, message_id: int) -> MessageInfo:
         is_animated=False,
         is_round=False,
     )
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+class AccessFailureGateway(FakeTelegramGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.older_calls = 0
+        self.fail_access = True
+
+    async def iter_older_messages(self, chat_id: int, offset_id: int | None):
+        self.older_calls += 1
+        if self.fail_access:
+            raise GroupAccessError("forbidden")
+        if False:
+            yield None
 
 
 @pytest.mark.asyncio
@@ -150,5 +176,41 @@ async def test_removed_group_ignores_new_events(tmp_path: Path) -> None:
 
         assert store.job_count() == 0
         assert store.enabled_chat_ids() == set()
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_group_access_errors_back_off_and_success_resets_delay(
+    tmp_path: Path,
+) -> None:
+    group = GroupTarget(-1001, "群")
+    gateway = AccessFailureGateway()
+    clock = FakeClock()
+    store = StateStore(tmp_path / "state.sqlite3")
+    store.reconcile_targets((group,))
+    coordinator = ScannerCoordinator(store, gateway, monotonic=clock)
+    try:
+        assert await coordinator.scan_once(group.chat_id) is False
+        assert await coordinator.scan_once(group.chat_id) is False
+        assert gateway.older_calls == 1
+
+        clock.advance(60)
+        assert await coordinator.scan_once(group.chat_id) is False
+        assert gateway.older_calls == 2
+
+        gateway.fail_access = False
+        clock.advance(300)
+        assert await coordinator.scan_once(group.chat_id) is False
+        store.set_history_cursor(group.chat_id, None, complete=False)
+
+        gateway.fail_access = True
+        assert await coordinator.scan_once(group.chat_id) is False
+        clock.advance(59)
+        assert await coordinator.scan_once(group.chat_id) is False
+        assert gateway.older_calls == 4
+        clock.advance(1)
+        assert await coordinator.scan_once(group.chat_id) is False
+        assert gateway.older_calls == 5
     finally:
         store.close()
