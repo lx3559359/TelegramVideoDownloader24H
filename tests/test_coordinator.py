@@ -70,6 +70,54 @@ async def test_catch_up_only_enqueues_messages_after_latest_seen(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_reenabled_group_catches_up_messages_seen_while_disabled(
+    tmp_path: Path,
+) -> None:
+    group = GroupTarget(-1001, "群")
+    gateway = FakeTelegramGateway(
+        {-1001: [make_video(-1001, message_id) for message_id in (5, 6, 7)]}
+    )
+    store = StateStore(tmp_path / "state.sqlite3")
+    coordinator = ScannerCoordinator(store, gateway)
+    try:
+        store.reconcile_targets((group,))
+        store.set_latest_seen(group.chat_id, 5)
+        store.reconcile_targets(())
+
+        await coordinator.apply_targets((group,))
+
+        assert store.job_count() == 2
+        assert store.get_group(group.chat_id).latest_seen_id == 7
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_catch_up_enabled_once_only_queries_enabled_groups(tmp_path: Path) -> None:
+    enabled = GroupTarget(-1001, "启用群")
+    disabled = GroupTarget(-1002, "禁用群")
+    gateway = FakeTelegramGateway(
+        {
+            enabled.chat_id: [make_video(enabled.chat_id, 6)],
+            disabled.chat_id: [make_video(disabled.chat_id, 6)],
+        }
+    )
+    store = StateStore(tmp_path / "state.sqlite3")
+    store.reconcile_targets((enabled, disabled))
+    store.set_latest_seen(enabled.chat_id, 5)
+    store.set_latest_seen(disabled.chat_id, 5)
+    store.reconcile_targets((enabled,))
+    coordinator = ScannerCoordinator(store, gateway)
+    try:
+        await coordinator.catch_up_enabled_once()
+
+        assert gateway.iterated_chat_ids == [enabled.chat_id]
+        assert store.job_count() == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_history_continues_below_saved_cursor(tmp_path: Path) -> None:
     gateway = FakeTelegramGateway(
         {-1001: [make_video(-1001, message_id) for message_id in (2, 4, 5, 6)]}

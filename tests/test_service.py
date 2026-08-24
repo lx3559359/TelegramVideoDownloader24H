@@ -67,6 +67,7 @@ async def test_hot_reload_applies_valid_config_and_ignores_invalid(
     paths, config_store = configure(tmp_path, (first,))
     gateway = FakeTelegramGateway()
     applied: list[tuple[GroupTarget, ...]] = []
+    catchups_started = asyncio.Event()
 
     class RecordingCoordinator:
         def __init__(self, state, telegram_gateway) -> None:
@@ -80,6 +81,10 @@ async def test_hot_reload_applies_valid_config_and_ignores_invalid(
             return set(), set()
 
         async def run_scans(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
+        async def run_catchups(self, stop: asyncio.Event) -> None:
+            catchups_started.set()
             await stop.wait()
 
     class WaitingWorker:
@@ -97,7 +102,7 @@ async def test_hot_reload_applies_valid_config_and_ignores_invalid(
     service_task = asyncio.create_task(
         DownloaderService(paths, lambda *_: gateway).run()
     )
-    await _wait_until(lambda: applied == [(first,)])
+    await _wait_until(lambda: applied == [(first,)] and catchups_started.is_set())
 
     config_store.save_config(AppConfig(groups=(first, second), config_poll_seconds=1))
     await _wait_until(lambda: applied[-1] == (first, second), timeout=3)

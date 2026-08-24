@@ -8,6 +8,9 @@ from tg_video_downloader.models import GroupTarget, JobSource, MessageInfo
 from tg_video_downloader.state import StateStore
 
 
+CATCHUP_INTERVAL_SECONDS = 5 * 60
+
+
 class ScannerCoordinator:
     def __init__(self, state: StateStore, gateway: TelegramGateway) -> None:
         self.state = state
@@ -23,10 +26,14 @@ class ScannerCoordinator:
         self,
         targets: tuple[GroupTarget, ...],
     ) -> tuple[set[int], set[int]]:
+        known_groups = {group.chat_id: group for group in self.state.group_states()}
         added, removed = self.state.reconcile_targets(targets)
         for chat_id in sorted(added):
             group = self.state.get_group(chat_id)
             if group.latest_seen_id is not None:
+                previous = known_groups.get(chat_id)
+                if previous is not None and not previous.enabled:
+                    await self.catch_up_once(chat_id)
                 continue
             try:
                 latest_id = await self.gateway.latest_message_id(chat_id)
@@ -72,6 +79,17 @@ class ScannerCoordinator:
             return
         self.state.set_access_error(chat_id, None)
 
+    async def catch_up_enabled_once(self) -> None:
+        for chat_id in sorted(self.state.enabled_chat_ids()):
+            await self.catch_up_once(chat_id)
+            await asyncio.sleep(0)
+
+    async def run_catchups(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            await _wait_or_stop(stop, CATCHUP_INTERVAL_SECONDS)
+            if not stop.is_set():
+                await self.catch_up_enabled_once()
+
     async def scan_once(self, chat_id: int, batch_size: int = 100) -> bool:
         group = self.state.get_group(chat_id)
         if not group.enabled or group.history_complete:
@@ -114,3 +132,10 @@ class ScannerCoordinator:
                 await asyncio.wait_for(stop.wait(), timeout=1)
             except TimeoutError:
                 pass
+
+
+async def _wait_or_stop(stop: asyncio.Event, delay: float) -> None:
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=delay)
+    except TimeoutError:
+        pass

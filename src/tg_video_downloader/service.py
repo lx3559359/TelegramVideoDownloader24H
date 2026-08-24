@@ -91,6 +91,7 @@ class DownloaderService:
             heartbeat.write(self._snapshot("running", state))
             tasks = [
                 asyncio.create_task(coordinator.run_scans(stop), name="history-scans"),
+                asyncio.create_task(coordinator.run_catchups(stop), name="catch-up-scans"),
                 asyncio.create_task(worker.run(stop), name="downloads"),
                 asyncio.create_task(
                     self._watch_config(reloader, coordinator, config_holder, stop),
