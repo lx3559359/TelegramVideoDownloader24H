@@ -1,3 +1,14 @@
+---
+domain:
+tags:
+  - telegram
+  - video-downloader
+  - windows
+datasets: {}
+models: []
+license: Apache License 2.0
+---
+
 # Telegram 视频自动下载器
 
 这是一个面向 Windows 的轻量 Telegram 个人账号工具。它只监听你在图形界面中明确勾选的群组：首次启用群组时回溯全部可访问历史视频，之后持续监听新视频，并在电脑或网络恢复后补抓停机期间仍可访问的消息。
