@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +54,39 @@ async def test_download_is_atomic_and_marks_completed(tmp_path: Path) -> None:
         assert final_path.read_bytes() == payload
         assert not (paths.temp / "-1001_1.part").exists()
         assert state.counts()["completed"] == 1
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_current_file_is_visible_only_while_job_is_active(tmp_path: Path) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    payload = b"payload"
+    message = make_video(1, size=len(payload))
+    state.upsert_job(message, "群", JobSource.LIVE)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_download(
+        chat_id: int,
+        message_id: int,
+        destination: Path,
+    ) -> Path:
+        started.set()
+        await release.wait()
+        destination.write_bytes(payload)
+        return destination
+
+    gateway.download_message = blocking_download
+    worker = DownloadWorker(paths, state, gateway)
+    try:
+        assert worker.current_file is None
+        task = asyncio.create_task(worker.run_one())
+        await started.wait()
+        assert worker.current_file == build_final_path(paths, "群", message).name
+        release.set()
+        assert await task == "completed"
+        assert worker.current_file is None
     finally:
         state.close()
 

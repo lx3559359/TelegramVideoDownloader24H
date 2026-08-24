@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from tg_video_downloader.models import AppConfig, Credentials, GroupTarget
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
 from tg_video_downloader.service import DownloaderService
+from tg_video_downloader.state import StateStore
 from tg_video_downloader.windows import request_stop
 from tests.fakes import FakeTelegramGateway
 
@@ -27,7 +29,7 @@ def configure(
 
 
 @pytest.mark.asyncio
-async def test_empty_whitelist_fails_before_connecting(tmp_path: Path) -> None:
+async def test_empty_whitelist_writes_needs_config_before_connecting(tmp_path: Path) -> None:
     paths, _ = configure(tmp_path, ())
     calls = 0
 
@@ -36,9 +38,11 @@ async def test_empty_whitelist_fails_before_connecting(tmp_path: Path) -> None:
         calls += 1
         return FakeTelegramGateway()
 
-    with pytest.raises(ValueError, match="至少选择一个群"):
-        await DownloaderService(paths, factory).run()
+    assert await DownloaderService(paths, factory).run() == 2
     assert calls == 0
+    heartbeat = HeartbeatWriter(paths.heartbeat).read()
+    assert heartbeat["status"] == "needs_config"
+    assert "至少选择一个群" in str(heartbeat["error"])
 
 
 @pytest.mark.asyncio
@@ -88,6 +92,8 @@ async def test_hot_reload_applies_valid_config_and_ignores_invalid(
             await stop.wait()
 
     class WaitingWorker:
+        current_file = None
+
         def __init__(self, paths, state, telegram_gateway) -> None:
             pass
 
@@ -135,6 +141,18 @@ async def test_authentication_error_writes_needs_login_once(tmp_path: Path) -> N
     heartbeat = HeartbeatWriter(paths.heartbeat).read()
     assert heartbeat["status"] == "needs_login"
     assert gateway.connect_calls == 1
+
+
+def test_running_snapshot_includes_current_file(tmp_path: Path) -> None:
+    paths, _ = configure(tmp_path, (GroupTarget(-1001, "群"),))
+    state = StateStore(paths.database)
+    service = DownloaderService(paths, lambda *_: FakeTelegramGateway())
+    worker = SimpleNamespace(current_file="7_video.mp4")
+    try:
+        snapshot = service._snapshot("running", state, worker=worker)
+        assert snapshot["current_file"] == "7_video.mp4"
+    finally:
+        state.close()
 
 
 async def _wait_until(predicate, timeout: float = 2) -> None:

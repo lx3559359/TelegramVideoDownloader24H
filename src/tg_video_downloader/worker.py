@@ -50,6 +50,11 @@ class DownloadWorker:
         self.state = state
         self.gateway = gateway
         self.disk_guard = DiskGuard(paths.downloads)
+        self._current_file: str | None = None
+
+    @property
+    def current_file(self) -> str | None:
+        return self._current_file
 
     def recover(self) -> int:
         recovered = self.state.recover_inflight()
@@ -65,50 +70,54 @@ class DownloadWorker:
         final_path = build_final_path(self.paths, job.group_title, job.message)
         final_path.parent.mkdir(parents=True, exist_ok=True)
         part_path = self._part_path(job.chat_id, job.message_id)
+        self._current_file = final_path.name
 
-        if _matches_expected_size(final_path, job.message.size):
+        try:
+            if _matches_expected_size(final_path, job.message.size):
+                part_path.unlink(missing_ok=True)
+                self.state.mark_completed(job, final_path)
+                return "completed"
+
+            if not self.disk_guard.has_space(job.message.size):
+                self.state.mark_retry(job, "磁盘可用空间低于安全阈值", delay_seconds=60)
+                return "disk_paused"
+
             part_path.unlink(missing_ok=True)
+            try:
+                actual_path = await self.gateway.download_message(
+                    job.chat_id,
+                    job.message_id,
+                    part_path,
+                )
+                actual_path = self.paths.assert_within_root(Path(actual_path))
+                if actual_path != part_path:
+                    os.replace(actual_path, part_path)
+                if not _matches_expected_size(part_path, job.message.size):
+                    raise TransientTelegramError("下载文件大小与 Telegram 元数据不一致")
+                os.replace(part_path, final_path)
+            except AuthenticationRequiredError:
+                raise
+            except PermanentMessageError as error:
+                part_path.unlink(missing_ok=True)
+                self.state.mark_permanent_error(job, str(error))
+                return "permanent_error"
+            except GroupAccessError as error:
+                self.state.set_access_error(job.chat_id, str(error))
+                self.state.mark_retry(job, str(error), delay_seconds=LONG_RETRY_SECONDS)
+                return "retry_wait"
+            except (TransientTelegramError, OSError) as error:
+                self.state.mark_retry(
+                    job,
+                    str(error),
+                    delay_seconds=_retry_delay(job),
+                )
+                return "retry_wait"
+
+            self.state.set_access_error(job.chat_id, None)
             self.state.mark_completed(job, final_path)
             return "completed"
-
-        if not self.disk_guard.has_space(job.message.size):
-            self.state.mark_retry(job, "磁盘可用空间低于安全阈值", delay_seconds=60)
-            return "disk_paused"
-
-        part_path.unlink(missing_ok=True)
-        try:
-            actual_path = await self.gateway.download_message(
-                job.chat_id,
-                job.message_id,
-                part_path,
-            )
-            actual_path = self.paths.assert_within_root(Path(actual_path))
-            if actual_path != part_path:
-                os.replace(actual_path, part_path)
-            if not _matches_expected_size(part_path, job.message.size):
-                raise TransientTelegramError("下载文件大小与 Telegram 元数据不一致")
-            os.replace(part_path, final_path)
-        except AuthenticationRequiredError:
-            raise
-        except PermanentMessageError as error:
-            part_path.unlink(missing_ok=True)
-            self.state.mark_permanent_error(job, str(error))
-            return "permanent_error"
-        except GroupAccessError as error:
-            self.state.set_access_error(job.chat_id, str(error))
-            self.state.mark_retry(job, str(error), delay_seconds=LONG_RETRY_SECONDS)
-            return "retry_wait"
-        except (TransientTelegramError, OSError) as error:
-            self.state.mark_retry(
-                job,
-                str(error),
-                delay_seconds=_retry_delay(job),
-            )
-            return "retry_wait"
-
-        self.state.set_access_error(job.chat_id, None)
-        self.state.mark_completed(job, final_path)
-        return "completed"
+        finally:
+            self._current_file = None
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():

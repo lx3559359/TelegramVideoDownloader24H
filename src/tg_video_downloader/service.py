@@ -38,14 +38,20 @@ class DownloaderService:
 
     async def run(self) -> int:
         self.paths.ensure_directories()
+        heartbeat = HeartbeatWriter(self.paths.heartbeat)
+        logger = configure_logging(self.paths.logs, ())
         config_store = ConfigStore(self.paths)
-        config = config_store.load_config().require_targets()
-        credentials = config_store.load_credentials().validate()
+        try:
+            config = config_store.load_config().require_targets()
+            credentials = config_store.load_credentials().validate()
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            logger.warning("启动配置无效: %s", error)
+            heartbeat.write({**_base_snapshot("needs_config"), "error": str(error)})
+            return 2
         logger = configure_logging(
             self.paths.logs,
             (credentials.api_hash, credentials.phone),
         )
-        heartbeat = HeartbeatWriter(self.paths.heartbeat)
 
         with SingleInstance(self.paths.runtime / "downloader.lock"):
             if is_stop_requested(self.paths):
@@ -74,6 +80,7 @@ class DownloaderService:
         stop = asyncio.Event()
         tasks: list[asyncio.Task[None]] = []
         status = "stopped"
+        worker: DownloadWorker | None = None
         try:
             worker = DownloadWorker(self.paths, state, gateway)
             coordinator = ScannerCoordinator(state, gateway)
@@ -88,7 +95,7 @@ class DownloaderService:
             reloader = config_store.reloader()
             reloader.load_if_changed()
             config_holder = [config]
-            heartbeat.write(self._snapshot("running", state))
+            heartbeat.write(self._snapshot("running", state, worker=worker))
             tasks = [
                 asyncio.create_task(coordinator.run_scans(stop), name="history-scans"),
                 asyncio.create_task(coordinator.run_catchups(stop), name="catch-up-scans"),
@@ -98,7 +105,7 @@ class DownloaderService:
                     name="config-reload",
                 ),
                 asyncio.create_task(
-                    self._write_heartbeat(heartbeat, state, stop),
+                    self._write_heartbeat(heartbeat, state, worker, stop),
                     name="heartbeat",
                 ),
                 asyncio.create_task(self._watch_stop(stop), name="stop-flag"),
@@ -109,12 +116,12 @@ class DownloaderService:
         except AuthenticationRequiredError as error:
             status = "needs_login"
             logger.warning("Telegram 认证失效: %s", error)
-            heartbeat.write(self._snapshot(status, state, error=str(error)))
+            heartbeat.write(self._snapshot(status, state, worker=worker, error=str(error)))
             return 0
         except Exception:
             status = "error"
             logger.exception("后台服务异常退出")
-            heartbeat.write(self._snapshot(status, state))
+            heartbeat.write(self._snapshot(status, state, worker=worker))
             raise
         finally:
             stop.set()
@@ -128,7 +135,7 @@ class DownloaderService:
             except Exception:
                 logger.exception("断开 Telegram 连接时发生错误")
             if status == "stopped":
-                heartbeat.write(self._snapshot("stopped", state))
+                heartbeat.write(self._snapshot("stopped", state, worker=worker))
             state.close()
 
     async def _watch_config(
@@ -161,12 +168,13 @@ class DownloaderService:
         self,
         writer: HeartbeatWriter,
         state: StateStore,
+        worker: DownloadWorker,
         stop: asyncio.Event,
     ) -> None:
         while not stop.is_set():
             await _wait_or_stop(stop, 5)
             if not stop.is_set():
-                writer.write(self._snapshot("running", state))
+                writer.write(self._snapshot("running", state, worker=worker))
 
     async def _watch_stop(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -180,6 +188,7 @@ class DownloaderService:
         status: str,
         state: StateStore,
         *,
+        worker: DownloadWorker | Any | None = None,
         error: str | None = None,
     ) -> dict[str, object]:
         snapshot = _base_snapshot(status)
@@ -194,6 +203,9 @@ class DownloaderService:
             }
             for group in state.group_states()
         ]
+        current_file = getattr(worker, "current_file", None)
+        if current_file:
+            snapshot["current_file"] = str(current_file)
         if self._config_error:
             snapshot["config_error"] = self._config_error
         if error:

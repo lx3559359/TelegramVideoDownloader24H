@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from tg_video_downloader.gateway import AuthenticationRequiredError
 from tg_video_downloader.gui.controller import GuiController
 from tg_video_downloader.models import Credentials, GroupTarget
+from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
 
 
@@ -105,3 +107,20 @@ def test_start_stop_and_missing_heartbeat(tmp_path: Path) -> None:
 
     assert process.actions == ["clear", ("start", paths.root), "stop"]
     assert controller.read_status() == {"status": "stopped"}
+
+
+def test_stale_running_heartbeat_is_not_reported_as_healthy(tmp_path: Path) -> None:
+    controller, paths, _, _ = make_controller(tmp_path)
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    HeartbeatWriter(paths.heartbeat).write(
+        {
+            "status": "running",
+            "updated_at": (now - timedelta(seconds=16)).isoformat(),
+        }
+    )
+
+    snapshot = controller.read_status(now=now)
+
+    assert snapshot["status"] == "stale"
+    assert snapshot["reported_status"] == "running"
+    assert "心跳" in str(snapshot["error"])

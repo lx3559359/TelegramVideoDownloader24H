@@ -5,6 +5,7 @@ import os
 import threading
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -21,6 +22,7 @@ from tg_video_downloader.windows import (
 
 
 T = TypeVar("T")
+STALE_HEARTBEAT_SECONDS = 15
 
 
 class AsyncBridge:
@@ -186,9 +188,27 @@ class GuiController:
     def stop(self) -> None:
         self.process_control.request_stop(self.paths)
 
-    def read_status(self) -> dict[str, object]:
+    def read_status(self, *, now: datetime | None = None) -> dict[str, object]:
         snapshot = HeartbeatWriter(self.paths.heartbeat).read()
-        return snapshot or {"status": "stopped"}
+        if not snapshot:
+            return {"status": "stopped"}
+        if snapshot.get("status") != "running":
+            return snapshot
+        try:
+            updated_at = datetime.fromisoformat(str(snapshot["updated_at"]))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            current = now or datetime.now(UTC)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            age = (current.astimezone(UTC) - updated_at.astimezone(UTC)).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            age = STALE_HEARTBEAT_SECONDS + 1
+        if age > STALE_HEARTBEAT_SECONDS:
+            snapshot["reported_status"] = "running"
+            snapshot["status"] = "stale"
+            snapshot["error"] = snapshot.get("error") or "后台心跳超过 15 秒未更新"
+        return snapshot
 
     def open_downloads(self) -> None:
         self.paths.downloads.mkdir(parents=True, exist_ok=True)
