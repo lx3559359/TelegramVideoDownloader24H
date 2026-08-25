@@ -76,6 +76,36 @@ def test_dependency_check_includes_cryptg(
     assert "cryptg" in seen
 
 
+def test_dependency_check_includes_tray_packages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "tg_video_downloader.diagnostics.version",
+        lambda name: seen.append(name) or "1.0",
+    )
+    doctor = Doctor(
+        ProjectPaths.from_root(tmp_path),
+        gateway_factory=lambda *_: FakeTelegramGateway(),
+    )
+
+    assert doctor._check_dependencies().status == "pass"
+    assert {"pillow", "pystray"}.issubset(seen)
+
+
+def test_tray_icon_check_builds_an_in_memory_windows_icon(tmp_path: Path) -> None:
+    doctor = Doctor(
+        ProjectPaths.from_root(tmp_path),
+        gateway_factory=lambda *_: FakeTelegramGateway(),
+    )
+
+    check = doctor._check_tray_icon()
+
+    assert check.status == "pass"
+    assert check.message == "Windows 托盘图标、菜单和默认动作可用"
+
+
 @pytest.mark.asyncio
 async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
     tmp_path: Path,
@@ -92,6 +122,7 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
         "python",
         "dependencies",
         "qr_code",
+        "tray_icon",
         "login_task",
         "config",
         "credentials",
@@ -171,7 +202,7 @@ async def test_project_path_failure_is_reported_without_aborting_other_checks(
 
     assert checks["project_paths"].status == "fail"
     assert checks["telegram"].status == "pass"
-    assert len(report.checks) == 11
+    assert len(report.checks) == 12
 
 
 @pytest.mark.asyncio

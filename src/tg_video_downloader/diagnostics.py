@@ -85,6 +85,7 @@ class Doctor:
             self._run_local("python", self._check_python),
             self._run_local("dependencies", self._check_dependencies),
             self._run_local("qr_code", self._check_qr_code),
+            self._run_local("tray_icon", self._check_tray_icon),
             self._run_local("login_task", self._check_login_task),
         ]
 
@@ -187,7 +188,14 @@ class Doctor:
 
     def _check_dependencies(self) -> DiagnosticCheck:
         installed: list[str] = []
-        for distribution in ("telethon", "cryptg", "tzdata", "qrcode"):
+        for distribution in (
+            "telethon",
+            "cryptg",
+            "tzdata",
+            "qrcode",
+            "pillow",
+            "pystray",
+        ):
             try:
                 installed.append(f"{distribution} {version(distribution)}")
             except PackageNotFoundError as error:
@@ -201,6 +209,24 @@ class Doctor:
         if not matrix or len(matrix) != len(matrix[0]):
             return DiagnosticCheck("qr_code", "fail", "二维码矩阵生成失败")
         return DiagnosticCheck("qr_code", "pass", "二维码组件可用且无需图片文件")
+
+    def _check_tray_icon(self) -> DiagnosticCheck:
+        import pystray
+
+        from tg_video_downloader.gui.tray import RUNNING_COLOR, create_status_icon
+
+        image = create_status_icon(RUNNING_COLOR)
+        if image.mode != "RGBA" or image.size != (64, 64):
+            return DiagnosticCheck("tray_icon", "fail", "托盘图标内存绘制失败")
+        if not getattr(pystray.Icon, "HAS_MENU", False):
+            return DiagnosticCheck("tray_icon", "fail", "Windows 托盘菜单不可用")
+        if not getattr(pystray.Icon, "HAS_DEFAULT_ACTION", False):
+            return DiagnosticCheck("tray_icon", "fail", "Windows 托盘默认动作不可用")
+        return DiagnosticCheck(
+            "tray_icon",
+            "pass",
+            "Windows 托盘图标、菜单和默认动作可用",
+        )
 
     def _check_login_task(self) -> DiagnosticCheck:
         if self.login_active is not None and self.login_active():
