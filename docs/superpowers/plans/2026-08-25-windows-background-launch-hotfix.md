@@ -232,7 +232,7 @@ git commit -m "fix: show background startup progress"
 
 Run: `scripts\check.ps1`
 
-Expected: 93 项测试全部通过，语法编译和项目路径守卫通过。
+Expected: 95 项测试全部通过，语法编译和项目路径守卫通过。
 
 - [ ] **Step 2: 运行依赖完整性检查**
 
@@ -285,7 +285,7 @@ Expected: 无空白错误；仅计划内提交，工作树洁净。
 
 Run: `scripts\check.ps1; .venv\Scripts\python.exe -m pip check`
 
-Expected: 93 项测试通过，依赖完整。
+Expected: 95 项测试通过，依赖完整。
 
 - [ ] **Step 3: 快进合并到 `master`**
 
