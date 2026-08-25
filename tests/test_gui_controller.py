@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tg_video_downloader.gateway import AuthenticationRequiredError
+from tg_video_downloader.gateway import AuthenticationRequiredError, QrLoginChallenge
 from tg_video_downloader.diagnostics import DiagnosticCheck, DiagnosticReport
 from tg_video_downloader.gui.app import format_doctor_summary
 from tg_video_downloader.gui.controller import GuiController
@@ -15,9 +15,21 @@ from tg_video_downloader.paths import ProjectPaths
 class LoginGateway:
     def __init__(self) -> None:
         self.connected = False
+        self.authorized = True
         self.sent_phone = None
         self.login_calls = []
         self.groups = (GroupTarget(-1001, "A 群"), GroupTarget(-1002, "B 群"))
+        self.challenge = QrLoginChallenge(
+            "tg://login?token=first",
+            datetime(2026, 8, 25, 1, 0, tzinfo=UTC),
+        )
+        self.refreshed_challenge = QrLoginChallenge(
+            "tg://login?token=second",
+            datetime(2026, 8, 25, 1, 1, tzinfo=UTC),
+        )
+        self.password_required = False
+        self.passwords: list[str] = []
+        self.logged_out = False
 
     async def connect(self) -> None:
         self.connected = True
@@ -26,7 +38,7 @@ class LoginGateway:
         self.connected = False
 
     async def is_authorized(self) -> bool:
-        return True
+        return self.authorized
 
     async def send_login_code(self, phone: str) -> None:
         self.sent_phone = phone
@@ -35,6 +47,25 @@ class LoginGateway:
         self.login_calls.append((phone, code, password))
         if password is None:
             raise AuthenticationRequiredError("需要二步验证密码")
+
+    async def start_qr_login(self) -> QrLoginChallenge:
+        return self.challenge
+
+    async def refresh_qr_login(self) -> QrLoginChallenge:
+        return self.refreshed_challenge
+
+    async def wait_qr_login(self) -> None:
+        if self.password_required:
+            raise AuthenticationRequiredError("需要二步验证密码")
+        self.authorized = True
+
+    async def complete_password(self, password: str) -> None:
+        self.passwords.append(password)
+        self.authorized = True
+
+    async def log_out(self) -> None:
+        self.logged_out = True
+        self.authorized = False
 
     async def list_groups(self) -> tuple[GroupTarget, ...]:
         return self.groups
@@ -108,6 +139,61 @@ async def test_phone_login_still_requires_phone(tmp_path: Path) -> None:
 
     assert gateway.connected is False
     assert gateway.sent_phone is None
+
+
+@pytest.mark.asyncio
+async def test_qr_login_reuses_authorized_session(tmp_path: Path) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    gateway.authorized = True
+
+    challenge = await controller.start_qr_login(Credentials(12345, "hash"))
+
+    assert challenge is None
+    assert gateway.connected is False
+    assert controller.login_active is False
+
+
+@pytest.mark.asyncio
+async def test_qr_login_refresh_password_and_cleanup(tmp_path: Path) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    gateway.authorized = False
+
+    first = await controller.start_qr_login(Credentials(12345, "hash"))
+    refreshed = await controller.refresh_qr_login()
+    gateway.password_required = True
+
+    assert first == gateway.challenge
+    assert refreshed == gateway.refreshed_challenge
+    assert await controller.wait_qr_login() == "需要二步验证密码"
+    assert await controller.complete_qr_password("two-factor") == "登录成功"
+    assert gateway.passwords == ["two-factor"]
+    assert gateway.connected is False
+    assert controller.login_active is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_login_is_idempotent(tmp_path: Path) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    gateway.authorized = False
+    await controller.start_qr_login(Credentials(12345, "hash"))
+
+    await controller.cancel_login()
+    await controller.cancel_login()
+
+    assert controller.login_active is False
+    assert gateway.connected is False
+
+
+@pytest.mark.asyncio
+async def test_logout_releases_login_gateway(tmp_path: Path) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    controller.save_credentials(Credentials(12345, "hash"))
+    gateway.authorized = True
+
+    assert await controller.log_out() == "已退出当前账号"
+    assert gateway.logged_out is True
+    assert gateway.connected is False
+    assert controller.login_active is False
 
 
 def test_start_stop_and_missing_heartbeat(tmp_path: Path) -> None:

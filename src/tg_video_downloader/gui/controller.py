@@ -11,7 +11,11 @@ from typing import Any, Protocol, TypeVar
 
 from tg_video_downloader.config import ConfigStore
 from tg_video_downloader.diagnostics import DiagnosticReport, Doctor
-from tg_video_downloader.gateway import AuthenticationRequiredError, TelegramGateway
+from tg_video_downloader.gateway import (
+    AuthenticationRequiredError,
+    QrLoginChallenge,
+    TelegramGateway,
+)
 from tg_video_downloader.models import AppConfig, Credentials, GroupTarget
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
@@ -112,11 +116,76 @@ class GuiController:
     def save_credentials(self, credentials: Credentials) -> None:
         self.config_store.save_credentials(credentials.validate_api())
 
+    @property
+    def login_active(self) -> bool:
+        return self._login_gateway is not None
+
+    async def start_qr_login(
+        self,
+        credentials: Credentials,
+    ) -> QrLoginChallenge | None:
+        credentials.validate_api()
+        self.save_credentials(credentials)
+        await self.cancel_login()
+        gateway = self.gateway_factory(self.paths, credentials)
+        try:
+            await gateway.connect()
+            authorized = await gateway.is_authorized()
+            if authorized:
+                challenge = None
+            else:
+                challenge = await gateway.start_qr_login()
+        except Exception:
+            try:
+                await gateway.disconnect()
+            except Exception:
+                pass
+            raise
+        if authorized:
+            await gateway.disconnect()
+            return None
+        self._login_gateway = gateway
+        self._login_credentials = credentials
+        return challenge
+
+    async def refresh_qr_login(self) -> QrLoginChallenge:
+        if self._login_gateway is None:
+            raise ValueError("请先开始二维码登录")
+        return await self._login_gateway.refresh_qr_login()
+
+    async def wait_qr_login(self) -> str:
+        if self._login_gateway is None:
+            raise ValueError("请先开始二维码登录")
+        try:
+            await self._login_gateway.wait_qr_login()
+        except AuthenticationRequiredError as error:
+            if "二步验证" in str(error):
+                return "需要二步验证密码"
+            raise
+        await self._clear_login()
+        return "登录成功"
+
+    async def complete_qr_password(self, password: str) -> str:
+        if self._login_gateway is None:
+            raise ValueError("请先扫码登录")
+        await self._login_gateway.complete_password(password)
+        await self._clear_login()
+        return "登录成功"
+
+    async def cancel_login(self) -> None:
+        await self._clear_login()
+
+    async def _clear_login(self) -> None:
+        gateway = self._login_gateway
+        self._login_gateway = None
+        self._login_credentials = None
+        if gateway is not None:
+            await gateway.disconnect()
+
     async def send_code(self, credentials: Credentials) -> None:
         credentials.validate_phone_login()
         self.save_credentials(credentials)
-        if self._login_gateway is not None:
-            await self._login_gateway.disconnect()
+        await self.cancel_login()
         gateway = self.gateway_factory(self.paths, credentials)
         try:
             await gateway.connect()
@@ -140,10 +209,22 @@ class GuiController:
             if "二步验证密码" in str(error):
                 return "需要二步验证密码"
             raise
-        await self._login_gateway.disconnect()
-        self._login_gateway = None
-        self._login_credentials = None
+        await self._clear_login()
         return "登录成功"
+
+    async def log_out(self) -> str:
+        await self.cancel_login()
+        credentials = self.load_credentials()
+        if credentials is None:
+            raise ValueError("尚未保存账号信息")
+        gateway = self.gateway_factory(self.paths, credentials)
+        try:
+            await gateway.connect()
+            if await gateway.is_authorized():
+                await gateway.log_out()
+        finally:
+            await gateway.disconnect()
+        return "已退出当前账号"
 
     async def list_groups(self) -> tuple[GroupTarget, ...]:
         credentials = self.load_credentials()
