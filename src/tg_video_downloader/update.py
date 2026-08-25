@@ -90,13 +90,26 @@ def run_command(
     *,
     cwd: Path | None = None,
 ) -> str:
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+    )
     completed = subprocess.run(
         arguments,
         cwd=cwd,
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="strict",
         shell=False,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+        env=environment,
     )
     return completed.stdout
 
@@ -254,7 +267,11 @@ class UpdateManager:
                     ("git", "ls-remote", "--tags", "--refs", remote_url),
                     cwd=self.paths.root if self.paths is not None else None,
                 )
-            except (OSError, subprocess.CalledProcessError) as error:
+            except (
+                OSError,
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as error:
                 if index == 0:
                     continue
                 raise UpdateCheckError("两个更新源均不可用") from error
@@ -369,6 +386,24 @@ class UpdateManager:
                 "目标版本不是当前版本的快进更新"
             ) from error
 
+    def validate_install_environment(self) -> None:
+        if self.paths is None:
+            raise UpdateSafetyError("更新操作缺少项目路径")
+        required_files = (
+            ("apply-update.ps1", self.paths.root / "scripts" / "apply-update.ps1"),
+            ("bootstrap.ps1", self.paths.root / "scripts" / "bootstrap.ps1"),
+            ("项目 Python", self.paths.root / ".venv" / "Scripts" / "python.exe"),
+        )
+        missing = [name for name, path in required_files if not path.is_file()]
+        if shutil.which("git") is None:
+            missing.append("Git")
+        if shutil.which("powershell.exe") is None:
+            missing.append("PowerShell")
+        if missing:
+            raise UpdateSafetyError(
+                "在线更新组件不可用：" + "、".join(missing)
+            )
+
     def prepare_install(
         self,
         prepared: PreparedRelease,
@@ -377,6 +412,7 @@ class UpdateManager:
         if self.paths is None:
             raise UpdateSafetyError("更新操作缺少项目路径")
         self.validate_prepared(prepared)
+        self.validate_install_environment()
         token = secrets.token_hex(16)
         request = UpdateRequest(
             token=token,

@@ -135,6 +135,33 @@ def test_wait_for_downloader_stop_reports_timeout(
         )
 
 
+def test_wait_for_downloader_stop_also_waits_for_supervisor_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    supervisor_running = iter((True, False))
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        windows,
+        "downloader_is_running",
+        lambda _paths: False,
+    )
+    monkeypatch.setattr(
+        windows,
+        "supervisor_is_running",
+        lambda _paths: next(supervisor_running),
+    )
+
+    windows.wait_for_downloader_stop(
+        paths,
+        monotonic=lambda: 0.0,
+        sleep=sleeps.append,
+    )
+
+    assert sleeps == [0.1]
+
+
 def test_detached_update_executor_has_no_console_or_pipes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

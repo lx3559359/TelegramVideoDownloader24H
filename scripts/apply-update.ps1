@@ -216,17 +216,21 @@ try {
 
         if ([bool]$Request.restore_service -and -not $NoServiceRestart) {
             Remove-Item -LiteralPath (Join-Path $ProjectRoot '.runtime\stop.flag') -Force -ErrorAction SilentlyContinue
+            $supervisorScript = Join-Path $ProjectRoot 'scripts\run-supervisor.ps1'
+            $supervisorArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $supervisorScript
             Start-Process `
                 -WindowStyle Hidden `
                 -FilePath 'powershell.exe' `
-                -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $ProjectRoot 'scripts\run-supervisor.ps1') `
+                -ArgumentList $supervisorArguments `
                 -WorkingDirectory $ProjectRoot
         }
         if (-not $NoRelaunch) {
+            $guiScript = Join-Path $ProjectRoot 'scripts\launch-gui.ps1'
+            $guiArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $guiScript
             Start-Process `
                 -WindowStyle Hidden `
                 -FilePath 'powershell.exe' `
-                -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $ProjectRoot 'scripts\launch-gui.ps1') `
+                -ArgumentList $guiArguments `
                 -WorkingDirectory $ProjectRoot
         }
     }

@@ -4,6 +4,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,7 @@ from tg_video_downloader.update import (
     read_update_request,
     write_update_request,
     write_update_result,
+    run_command,
 )
 from tg_video_downloader.paths import ProjectPaths
 
@@ -118,6 +120,45 @@ def test_both_remote_failures_are_reported() -> None:
 
     with pytest.raises(UpdateCheckError, match="两个更新源"):
         UpdateManager(runner=runner, current_version="0.1.0").check_latest()
+
+
+def test_git_runner_is_bounded_noninteractive_and_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(arguments, **kwargs):
+        captured["arguments"] = arguments
+        captured.update(kwargs)
+        return SimpleNamespace(stdout="打开配置器.cmd\0")
+
+    monkeypatch.setattr("tg_video_downloader.update.subprocess.run", fake_run)
+
+    assert run_command(("git", "status"), cwd=tmp_path) == "打开配置器.cmd\0"
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["encoding"] == "utf-8"
+    assert captured["timeout"] == 60
+    assert captured["shell"] is False
+    assert captured["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert captured["env"]["LC_ALL"] == "C"
+
+
+def test_primary_timeout_falls_back_to_modelscope() -> None:
+    calls: list[str] = []
+
+    def runner(arguments: tuple[str, ...], **_kwargs) -> str:
+        remote = arguments[-1]
+        calls.append(remote)
+        if remote == GITHUB_URL:
+            raise subprocess.TimeoutExpired(arguments, 60)
+        return "abc refs/tags/v0.2.0\n"
+
+    release = UpdateManager(runner=runner, current_version="0.1.0").check_latest()
+
+    assert release is not None
+    assert release.source == "魔塔"
+    assert calls == [GITHUB_URL, MODELSCOPE_URL]
 
 
 def git(cwd: Path, *arguments: str) -> str:
@@ -376,6 +417,7 @@ def test_prepare_install_copies_executor_writes_request_and_launches(
         launch_update=launch,
     )
     manager.validate_prepared = lambda value: events.append("validate")
+    manager.validate_install_environment = lambda: None
 
     request = manager.prepare_install(prepared, True)
 
@@ -420,6 +462,7 @@ def test_prepare_install_cleans_only_its_files_when_launch_fails(
         launch_update=fail_launch,
     )
     manager.validate_prepared = lambda _value: None
+    manager.validate_install_environment = lambda: None
 
     with pytest.raises(OSError, match="launch failed"):
         manager.prepare_install(prepared, False)

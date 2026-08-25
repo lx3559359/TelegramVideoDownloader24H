@@ -112,6 +112,10 @@ def downloader_is_running(paths: ProjectPaths) -> bool:
     return _file_is_locked(paths.runtime / "downloader.lock")
 
 
+def supervisor_is_running(paths: ProjectPaths) -> bool:
+    return _file_is_locked(paths.runtime / "supervisor.pid")
+
+
 def wait_for_downloader_stop(
     paths: ProjectPaths,
     timeout_seconds: float = 30.0,
@@ -120,7 +124,7 @@ def wait_for_downloader_stop(
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     deadline = monotonic() + timeout_seconds
-    while downloader_is_running(paths):
+    while downloader_is_running(paths) or supervisor_is_running(paths):
         if monotonic() >= deadline:
             raise TimeoutError("后台下载器未在 30 秒内停止")
         sleep(0.1)

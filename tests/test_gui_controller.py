@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,6 +190,7 @@ async def test_prepare_update_stops_only_a_previously_running_service(
     installs: list[tuple[object, bool]] = []
     controller.update_manager = SimpleNamespace(
         validate_prepared=lambda _value: None,
+        validate_install_environment=lambda: None,
         prepare_install=lambda value, restore: installs.append((value, restore)),
     )
     monkeypatch.setattr(
@@ -218,6 +220,7 @@ async def test_prepare_update_does_not_stop_an_already_stopped_service(
     installs: list[tuple[object, bool]] = []
     controller.update_manager = SimpleNamespace(
         validate_prepared=lambda _value: None,
+        validate_install_environment=lambda: None,
         prepare_install=lambda value, restore: installs.append((value, restore)),
     )
     monkeypatch.setattr(
@@ -240,7 +243,8 @@ async def test_prepare_update_rejects_active_login_before_service_control(
     controller.update_manager = SimpleNamespace(
         validate_prepared=lambda _value: (_ for _ in ()).throw(
             AssertionError("must not validate during login")
-        )
+        ),
+        validate_install_environment=lambda: None,
     )
 
     with pytest.raises(ValueError, match="登录"):
@@ -262,6 +266,73 @@ def test_update_result_is_consumed_only_once(tmp_path: Path) -> None:
 
     assert controller.consume_update_result() == result
     assert controller.consume_update_result() is None
+
+
+@pytest.mark.asyncio
+async def test_update_preparation_finishes_transaction_after_gui_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _, process = make_controller(tmp_path)
+    validation_started = threading.Event()
+    allow_validation = threading.Event()
+    install_finished = threading.Event()
+    installs: list[tuple[object, bool]] = []
+    prepared = SimpleNamespace(tag="v0.2.0")
+
+    def validate(_value: object) -> None:
+        validation_started.set()
+        assert allow_validation.wait(timeout=5)
+
+    def install(value: object, restore: bool) -> None:
+        installs.append((value, restore))
+        install_finished.set()
+
+    controller.update_manager = SimpleNamespace(
+        validate_prepared=validate,
+        validate_install_environment=lambda: None,
+        prepare_install=install,
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.controller.downloader_is_running",
+        lambda _paths: False,
+    )
+    task = asyncio.create_task(controller.prepare_update_install(prepared))
+    assert await asyncio.to_thread(validation_started.wait, 5)
+
+    task.cancel()
+    allow_validation.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(install_finished.wait, 5)
+
+    assert installs == [(prepared, False)]
+    assert process.actions == []
+
+
+@pytest.mark.asyncio
+async def test_missing_update_environment_does_not_stop_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _, process = make_controller(tmp_path)
+    controller.update_manager = SimpleNamespace(
+        validate_prepared=lambda _value: None,
+        validate_install_environment=lambda: (_ for _ in ()).throw(
+            RuntimeError("PowerShell missing")
+        ),
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.controller.downloader_is_running",
+        lambda _paths: (_ for _ in ()).throw(
+            AssertionError("must not inspect service before environment validation")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="PowerShell missing"):
+        await controller.prepare_update_install(SimpleNamespace(tag="v0.2.0"))
+
+    assert process.actions == []
 
 
 @pytest.mark.asyncio

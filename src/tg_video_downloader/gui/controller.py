@@ -331,24 +331,24 @@ class GuiController:
     async def prepare_update_install(self, prepared: PreparedRelease) -> None:
         if self.login_active:
             raise ValueError("请先完成或取消当前登录任务")
+        await asyncio.to_thread(self._prepare_update_install, prepared)
+
+    def _prepare_update_install(self, prepared: PreparedRelease) -> None:
         manager = self._get_update_manager()
-        await asyncio.to_thread(manager.validate_prepared, prepared)
+        manager.validate_prepared(prepared)
+        manager.validate_install_environment()
         restore_service = downloader_is_running(self.paths)
         if restore_service:
             self.process_control.request_stop(self.paths)
             try:
-                await asyncio.to_thread(wait_for_downloader_stop, self.paths)
+                wait_for_downloader_stop(self.paths)
             except Exception:
                 self.process_control.clear_stop(self.paths)
                 if not downloader_is_running(self.paths):
                     self.process_control.start(self.paths.root)
                 raise
         try:
-            await asyncio.to_thread(
-                manager.prepare_install,
-                prepared,
-                restore_service,
-            )
+            manager.prepare_install(prepared, restore_service)
         except Exception:
             if restore_service:
                 self.process_control.clear_stop(self.paths)

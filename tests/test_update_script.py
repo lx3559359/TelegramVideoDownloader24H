@@ -185,6 +185,19 @@ def test_update_script_has_safe_transaction_contract() -> None:
         assert fragment not in script
 
 
+def test_update_script_quotes_relaunch_paths_that_may_contain_spaces() -> None:
+    script = UPDATE_SCRIPT.read_text(encoding="utf-8")
+
+    assert (
+        "$supervisorArguments = "
+        "'-NoProfile -ExecutionPolicy Bypass -File \"{0}\"' -f $supervisorScript"
+    ) in script
+    assert (
+        "$guiArguments = "
+        "'-NoProfile -ExecutionPolicy Bypass -File \"{0}\"' -f $guiScript"
+    ) in script
+
+
 def test_update_script_rolls_back_then_succeeds_without_touching_data(
     tmp_path: Path,
 ) -> None:
