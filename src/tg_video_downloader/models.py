@@ -86,3 +86,4 @@ class DownloadJob:
     status: JobStatus
     message: MessageInfo
     attempts: int
+    output_root: Path | None = None

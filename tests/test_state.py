@@ -187,3 +187,70 @@ def test_mark_permanent_error(store: StateStore, live_message: MessageInfo) -> N
 
     store.mark_permanent_error(job, "forbidden")
     assert store.counts()["permanent_error"] == 1
+
+
+def test_existing_database_adds_output_root_column(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE jobs (
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            group_title TEXT NOT NULL,
+            source TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            message_date TEXT NOT NULL,
+            mime_type TEXT,
+            original_name TEXT,
+            extension TEXT NOT NULL,
+            expected_size INTEGER,
+            is_video INTEGER NOT NULL,
+            is_animated INTEGER NOT NULL,
+            is_round INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT,
+            final_path TEXT,
+            error TEXT,
+            PRIMARY KEY(chat_id, message_id)
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    state = StateStore(database)
+    try:
+        columns = {
+            str(row["name"])
+            for row in state._connection.execute("PRAGMA table_info(jobs)")
+        }
+        assert "output_root" in columns
+    finally:
+        state.close()
+
+
+def test_bind_output_root_is_first_writer_wins_and_survives_release(
+    tmp_path: Path,
+    store: StateStore,
+    live_message: MessageInfo,
+) -> None:
+    store.upsert_job(live_message, "群", JobSource.LIVE)
+    job = store.claim_next()
+    assert job is not None
+
+    first = store.bind_output_root(job, tmp_path / "first")
+    second = store.bind_output_root(first, tmp_path / "second")
+    store.release(second)
+    claimed_again = store.claim_next()
+
+    assert first.output_root == (tmp_path / "first").resolve()
+    assert second.output_root == first.output_root
+    assert claimed_again is not None
+    assert claimed_again.output_root == first.output_root
+    assert store.get_job(job.chat_id, job.message_id) == claimed_again
+
+
+def test_get_job_returns_none_for_unknown_key(store: StateStore) -> None:
+    assert store.get_job(-9999, 123) is None

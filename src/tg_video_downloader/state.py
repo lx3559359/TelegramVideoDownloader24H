@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     is_round INTEGER NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT,
+    output_root TEXT,
     final_path TEXT,
     error TEXT,
     PRIMARY KEY(chat_id, message_id),
@@ -81,15 +82,21 @@ class StateStore:
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.executescript(SCHEMA)
-        columns = {
+        group_columns = {
             str(row["name"])
             for row in self._connection.execute("PRAGMA table_info(groups)").fetchall()
         }
-        if "download_history" not in columns:
+        if "download_history" not in group_columns:
             self._connection.execute(
                 "ALTER TABLE groups ADD COLUMN download_history "
                 "INTEGER NOT NULL DEFAULT 1"
             )
+        job_columns = {
+            str(row["name"])
+            for row in self._connection.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "output_root" not in job_columns:
+            self._connection.execute("ALTER TABLE jobs ADD COLUMN output_root TEXT")
         self._connection.commit()
 
     def close(self) -> None:
@@ -305,6 +312,44 @@ class StateStore:
                 (job.chat_id, job.message_id),
             )
 
+    def bind_output_root(self, job: DownloadJob, root: Path) -> DownloadJob:
+        resolved = root.resolve()
+        with self._connection:
+            self._connection.execute(
+                """
+                UPDATE jobs
+                SET output_root = ?
+                WHERE chat_id = ? AND message_id = ? AND output_root IS NULL
+                """,
+                (str(resolved), job.chat_id, job.message_id),
+            )
+            row = self._connection.execute(
+                """
+                SELECT output_root FROM jobs
+                WHERE chat_id = ? AND message_id = ?
+                """,
+                (job.chat_id, job.message_id),
+            ).fetchone()
+        if row is None or row["output_root"] is None:
+            raise RuntimeError("下载任务输出目录绑定失败")
+        return replace(
+            job,
+            output_root=Path(str(row["output_root"])).resolve(),
+        )
+
+    def get_job(self, chat_id: int, message_id: int) -> DownloadJob | None:
+        row = self._connection.execute(
+            "SELECT * FROM jobs WHERE chat_id = ? AND message_id = ?",
+            (chat_id, message_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._job_from_row(
+            row,
+            status=JobStatus(str(row["status"])),
+            attempts=int(row["attempts"]),
+        )
+
     def mark_completed(self, job: DownloadJob, final_path: Path) -> None:
         with self._connection:
             self._connection.execute(
@@ -465,6 +510,11 @@ class StateStore:
             status=status,
             message=message,
             attempts=attempts,
+            output_root=(
+                None
+                if row["output_root"] is None
+                else Path(str(row["output_root"])).resolve()
+            ),
         )
 
 
