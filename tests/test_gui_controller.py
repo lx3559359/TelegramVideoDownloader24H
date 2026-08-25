@@ -116,6 +116,19 @@ def test_save_credentials_and_selected_groups(tmp_path: Path) -> None:
         controller.save_selected_groups(())
 
 
+def test_controller_preserves_selected_history_policy(tmp_path: Path) -> None:
+    controller, _, _, _ = make_controller(tmp_path)
+    groups = (
+        GroupTarget(-1001, "只监听新内容", False),
+        GroupTarget(-1002, "包含历史", True),
+    )
+
+    controller.save_selected_groups(groups)
+
+    assert controller.selected_groups() == groups
+    assert controller.selected_chat_ids() == {-1001, -1002}
+
+
 @pytest.mark.asyncio
 async def test_login_flow_and_group_listing(tmp_path: Path) -> None:
     controller, _, gateway, _ = make_controller(tmp_path)

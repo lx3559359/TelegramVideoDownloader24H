@@ -129,6 +129,38 @@ def test_start_service_sets_starting_status() -> None:
     assert app.status_vars["status"].get() == "starting"
 
 
+def test_history_column_enables_target_and_history() -> None:
+    app = object.__new__(DownloaderApp)
+    app._selected_ids = set()
+    app._history_ids = set()
+    app.group_tree = SimpleNamespace(
+        identify_row=lambda _y: "-1001",
+        identify_column=lambda _x: "#2",
+    )
+    app._render_groups = lambda: None
+
+    app._toggle_group(SimpleNamespace(x=80, y=10))
+
+    assert app._selected_ids == {-1001}
+    assert app._history_ids == {-1001}
+
+
+def test_turning_monitoring_off_also_turns_history_off() -> None:
+    app = object.__new__(DownloaderApp)
+    app._selected_ids = {-1001}
+    app._history_ids = {-1001}
+    app.group_tree = SimpleNamespace(
+        identify_row=lambda _y: "-1001",
+        identify_column=lambda _x: "#1",
+    )
+    app._render_groups = lambda: None
+
+    app._toggle_group(SimpleNamespace(x=20, y=10))
+
+    assert app._selected_ids == set()
+    assert app._history_ids == set()
+
+
 def test_expired_qr_refreshes_current_generation() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False

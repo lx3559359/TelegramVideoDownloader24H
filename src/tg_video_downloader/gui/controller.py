@@ -262,12 +262,14 @@ class GuiController:
         finally:
             await gateway.disconnect()
 
-    def selected_chat_ids(self) -> set[int]:
+    def selected_groups(self) -> tuple[GroupTarget, ...]:
         try:
-            config = self.config_store.load_config()
+            return self.config_store.load_config().groups
         except FileNotFoundError:
-            return set()
-        return {group.chat_id for group in config.groups}
+            return ()
+
+    def selected_chat_ids(self) -> set[int]:
+        return {group.chat_id for group in self.selected_groups()}
 
     def save_selected_groups(self, groups: tuple[GroupTarget, ...]) -> None:
         try:

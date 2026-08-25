@@ -34,7 +34,13 @@ class DownloaderApp(ttk.Frame):
         self._closed = False
         self._status_after: str | None = None
         self._groups: tuple[GroupTarget, ...] = ()
-        self._selected_ids = controller.selected_chat_ids()
+        saved = {group.chat_id: group for group in controller.selected_groups()}
+        self._selected_ids = set(saved)
+        self._history_ids = {
+            chat_id
+            for chat_id, group in saved.items()
+            if group.download_history
+        }
         self._qr_generation = 0
         self._qr_wait_future: Future[Any] | None = None
         self._qr_retry_after: str | None = None
@@ -233,15 +239,17 @@ class DownloaderApp(ttk.Frame):
 
         self.group_tree = ttk.Treeview(
             page,
-            columns=("selected", "title", "chat_id"),
+            columns=("selected", "history", "title", "chat_id"),
             show="headings",
             selectmode="browse",
         )
-        self.group_tree.heading("selected", text="选择")
+        self.group_tree.heading("selected", text="监听")
+        self.group_tree.heading("history", text="历史")
         self.group_tree.heading("title", text="名称")
         self.group_tree.heading("chat_id", text="会话 ID")
         self.group_tree.column("selected", width=60, anchor="center", stretch=False)
-        self.group_tree.column("title", width=420)
+        self.group_tree.column("history", width=60, anchor="center", stretch=False)
+        self.group_tree.column("title", width=360)
         self.group_tree.column("chat_id", width=180, anchor="e")
         self.group_tree.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(page, orient="vertical", command=self.group_tree.yview)
@@ -700,7 +708,15 @@ class DownloaderApp(ttk.Frame):
     def _load_groups(self) -> None:
         def finished(groups: tuple[GroupTarget, ...]) -> None:
             self._groups = groups
-            self._selected_ids = self.controller.selected_chat_ids()
+            saved = {
+                group.chat_id: group for group in self.controller.selected_groups()
+            }
+            self._selected_ids = set(saved)
+            self._history_ids = {
+                chat_id
+                for chat_id, group in saved.items()
+                if group.download_history
+            }
             self._render_groups()
 
         self._run_async(
@@ -716,11 +732,12 @@ class DownloaderApp(ttk.Frame):
             if query and query not in group.title.casefold() and query not in str(group.chat_id):
                 continue
             selected = "☑" if group.chat_id in self._selected_ids else "☐"
+            history = "☑" if group.chat_id in self._history_ids else "☐"
             self.group_tree.insert(
                 "",
                 "end",
                 iid=str(group.chat_id),
-                values=(selected, group.title, group.chat_id),
+                values=(selected, history, group.title, group.chat_id),
             )
         self._update_selection_count()
 
@@ -730,10 +747,23 @@ class DownloaderApp(ttk.Frame):
             item = self.group_tree.focus()
         if item:
             chat_id = int(item)
-            if chat_id in self._selected_ids:
-                self._selected_ids.remove(chat_id)
-            else:
+            column = (
+                self.group_tree.identify_column(event.x)
+                if hasattr(event, "x")
+                else ""
+            )
+            if column == "#2":
                 self._selected_ids.add(chat_id)
+                if chat_id in self._history_ids:
+                    self._history_ids.remove(chat_id)
+                else:
+                    self._history_ids.add(chat_id)
+            else:
+                if chat_id in self._selected_ids:
+                    self._selected_ids.remove(chat_id)
+                    self._history_ids.discard(chat_id)
+                else:
+                    self._selected_ids.add(chat_id)
             self._render_groups()
         return "break"
 
@@ -741,7 +771,15 @@ class DownloaderApp(ttk.Frame):
         self.selection_count_var.set(f"已选择 {len(self._selected_ids)} 个群组/频道")
 
     def _save_groups(self) -> None:
-        groups = tuple(group for group in self._groups if group.chat_id in self._selected_ids)
+        groups = tuple(
+            GroupTarget(
+                group.chat_id,
+                group.title,
+                group.chat_id in self._history_ids,
+            )
+            for group in self._groups
+            if group.chat_id in self._selected_ids
+        )
         try:
             self.controller.save_selected_groups(groups)
         except Exception as error:
