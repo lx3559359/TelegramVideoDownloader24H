@@ -13,7 +13,6 @@ from tg_video_downloader.diagnostics import DiagnosticReport
 from tg_video_downloader.gateway import (
     QrLoginChallenge,
     QrLoginExpiredError,
-    TelethonGateway,
     TransientTelegramError,
 )
 from tg_video_downloader.gui.controller import AsyncBridge, GuiController
@@ -24,7 +23,6 @@ from tg_video_downloader.gui.qr_view import (
     seconds_until_expiry,
 )
 from tg_video_downloader.models import Credentials, GroupTarget
-from tg_video_downloader.paths import ProjectPaths
 
 
 def _format_bytes(value: int | float) -> str:
@@ -1018,18 +1016,3 @@ def format_doctor_summary(report: DiagnosticReport, saved: Path) -> str:
         f"失败：{counts['fail']}\n\n"
         f"完整报告：{saved}"
     )
-
-
-def run_gui(paths: ProjectPaths) -> None:
-    root = tk.Tk()
-    root.title("Telegram 视频自动下载器")
-    root.geometry("900x720")
-    root.minsize(800, 620)
-    app = DownloaderApp(root, GuiController(paths, TelethonGateway))
-
-    def close_window() -> None:
-        app.close()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", close_window)
-    root.mainloop()

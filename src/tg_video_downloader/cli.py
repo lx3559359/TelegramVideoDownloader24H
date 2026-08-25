@@ -17,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[2]
     paths = ProjectPaths.from_root(root)
     if args.command == "gui":
-        from tg_video_downloader.gui.app import run_gui
+        from tg_video_downloader.gui.runtime import run_gui
 
         run_gui(paths)
         return 0
