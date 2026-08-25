@@ -187,7 +187,7 @@ class Doctor:
 
     def _check_dependencies(self) -> DiagnosticCheck:
         installed: list[str] = []
-        for distribution in ("telethon", "tzdata", "qrcode"):
+        for distribution in ("telethon", "cryptg", "tzdata", "qrcode"):
             try:
                 installed.append(f"{distribution} {version(distribution)}")
             except PackageNotFoundError as error:

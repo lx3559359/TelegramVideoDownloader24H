@@ -40,3 +40,17 @@ def test_gui_launcher_does_not_hide_interactive_window() -> None:
 def test_double_click_entry_calls_gui_launcher() -> None:
     text = (ROOT / "打开配置器.cmd").read_text(encoding="utf-8")
     assert "scripts\\launch-gui.ps1" in text
+
+
+def test_bootstrap_installs_and_verifies_cryptg_inside_project_venv() -> None:
+    bootstrap = (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    pip_install = bootstrap.index("& $ProjectPython -m pip install")
+    cryptg_check = bootstrap.index('& $ProjectPython -c "import cryptg;')
+
+    assert '"cryptg>=0.6,<0.7",' in pyproject
+    assert bootstrap.index("$env:TEMP") < pip_install
+    assert bootstrap.index("$env:TMP") < pip_install
+    assert bootstrap.index("$env:PIP_CACHE_DIR") < pip_install
+    assert bootstrap.index("$env:PYTHONPYCACHEPREFIX") < pip_install
+    assert pip_install < cryptg_check

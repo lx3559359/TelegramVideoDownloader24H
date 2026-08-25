@@ -30,6 +30,10 @@ $ProjectPython = Join-Path $VenvRoot "Scripts\python.exe"
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
+& $ProjectPython -c "import cryptg; print('cryptg acceleration ready')"
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 & $ProjectPython -c "import sys; assert sys.version_info >= (3, 11), 'Python 3.11 or newer is required'"
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE

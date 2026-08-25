@@ -56,6 +56,26 @@ import tg_video_downloader.diagnostics
     assert result.returncode == 0, result.stderr
 
 
+def test_dependency_check_includes_cryptg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def fake_version(name: str) -> str:
+        seen.append(name)
+        return "1.0"
+
+    monkeypatch.setattr("tg_video_downloader.diagnostics.version", fake_version)
+    doctor = Doctor(
+        ProjectPaths.from_root(tmp_path),
+        gateway_factory=lambda *_: FakeTelegramGateway(),
+    )
+
+    assert doctor._check_dependencies().status == "pass"
+    assert "cryptg" in seen
+
+
 @pytest.mark.asyncio
 async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
     tmp_path: Path,
