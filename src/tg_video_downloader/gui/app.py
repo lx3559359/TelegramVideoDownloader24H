@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import tkinter as tk
-from concurrent.futures import Future
+from concurrent.futures import CancelledError, Future
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
 
 from tg_video_downloader.diagnostics import DiagnosticReport
-from tg_video_downloader.gateway import TelethonGateway
+from tg_video_downloader.gateway import (
+    QrLoginChallenge,
+    QrLoginExpiredError,
+    TelethonGateway,
+    TransientTelegramError,
+)
 from tg_video_downloader.gui.controller import AsyncBridge, GuiController
+from tg_video_downloader.gui.qr_view import (
+    draw_qr,
+    make_qr_matrix,
+    retry_delay,
+    seconds_until_expiry,
+)
 from tg_video_downloader.models import Credentials, GroupTarget
 from tg_video_downloader.paths import ProjectPaths
 
@@ -23,6 +35,12 @@ class DownloaderApp(ttk.Frame):
         self._status_after: str | None = None
         self._groups: tuple[GroupTarget, ...] = ()
         self._selected_ids = controller.selected_chat_ids()
+        self._qr_generation = 0
+        self._qr_wait_future: Future[Any] | None = None
+        self._qr_retry_after: str | None = None
+        self._qr_countdown_after: str | None = None
+        self._qr_expires_at: datetime | None = None
+        self._qr_retry_attempt = 0
 
         self.pack(fill="both", expand=True)
         self._build_account_page()
@@ -43,32 +61,153 @@ class DownloaderApp(ttk.Frame):
         self.phone_var = tk.StringVar()
         self.code_var = tk.StringVar()
         self.password_var = tk.StringVar()
-        fields = (
-            ("API ID", self.api_id_var, None),
-            ("API Hash", self.api_hash_var, "*"),
-            ("手机号", self.phone_var, None),
-            ("验证码", self.code_var, None),
-            ("二步验证密码", self.password_var, "*"),
-        )
-        for row, (label, variable, mask) in enumerate(fields):
+        self.qr_password_var = tk.StringVar()
+        self.account_status_var = tk.StringVar(value="尚未登录")
+        self.qr_countdown_var = tk.StringVar()
+        self.phone_login_visible = False
+
+        for row, (label, variable, mask) in enumerate(
+            (
+                ("API ID", self.api_id_var, None),
+                ("API Hash", self.api_hash_var, "*"),
+            )
+        ):
             ttk.Label(page, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=7)
             entry = ttk.Entry(page, textvariable=variable, show=mask or "")
             entry.grid(row=row, column=1, sticky="ew", pady=7)
 
-        actions = ttk.Frame(page)
-        actions.grid(row=len(fields), column=0, columnspan=2, sticky="w", pady=(14, 8))
-        self.send_code_button = ttk.Button(actions, text="发送验证码", command=self._send_code)
-        self.send_code_button.pack(side="left", padx=(0, 8))
-        self.login_button = ttk.Button(actions, text="完成登录", command=self._complete_login)
-        self.login_button.pack(side="left")
-        self.account_status_var = tk.StringVar(value="尚未登录")
         ttk.Label(page, textvariable=self.account_status_var).grid(
-            row=len(fields) + 1,
+            row=2,
             column=0,
             columnspan=2,
             sticky="w",
-            pady=(8, 0),
+            pady=(10, 0),
         )
+        ttk.Label(page, textvariable=self.qr_countdown_var).grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(4, 0),
+        )
+
+        self.qr_canvas = tk.Canvas(
+            page,
+            width=260,
+            height=260,
+            background="white",
+            highlightthickness=0,
+        )
+        self.qr_canvas.grid(row=4, column=0, columnspan=2, pady=12)
+        self.qr_canvas.grid_remove()
+
+        self.qr_actions = ttk.Frame(page)
+        self.qr_actions.grid(row=5, column=0, columnspan=2, sticky="w")
+        self.qr_login_button = ttk.Button(
+            self.qr_actions,
+            text="扫码登录",
+            command=self._start_qr_login,
+        )
+        self.qr_login_button.pack(side="left", padx=(0, 8))
+        self.qr_refresh_button = ttk.Button(
+            self.qr_actions,
+            text="重新生成",
+            command=self._manual_refresh_qr,
+        )
+        self.qr_refresh_button.pack(side="left", padx=(0, 8))
+        self.qr_refresh_button.state(["disabled"])
+        self.qr_cancel_button = ttk.Button(
+            self.qr_actions,
+            text="取消登录",
+            command=self._cancel_qr_login,
+        )
+        self.qr_cancel_button.pack(side="left")
+        self.qr_cancel_button.state(["disabled"])
+
+        self.qr_password_frame = ttk.Frame(page)
+        self.qr_password_frame.grid(
+            row=6,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(10, 0),
+        )
+        self.qr_password_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.qr_password_frame, text="二步验证密码").grid(
+            row=0,
+            column=0,
+            padx=(0, 12),
+        )
+        ttk.Entry(
+            self.qr_password_frame,
+            textvariable=self.qr_password_var,
+            show="*",
+        ).grid(row=0, column=1, sticky="ew")
+        self.qr_password_button = ttk.Button(
+            self.qr_password_frame,
+            text="提交密码",
+            command=self._complete_qr_password,
+        )
+        self.qr_password_button.grid(row=0, column=2, padx=(8, 0))
+        self.qr_password_frame.grid_remove()
+
+        self.phone_toggle_button = ttk.Button(
+            page,
+            text="使用手机号验证码登录",
+            command=self._toggle_phone_login,
+        )
+        self.phone_toggle_button.grid(
+            row=7,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(18, 0),
+        )
+        self.phone_login_frame = ttk.Frame(page)
+        self.phone_login_frame.grid(row=8, column=0, columnspan=2, sticky="ew")
+        self.phone_login_frame.columnconfigure(1, weight=1)
+        for row, (label, variable, mask) in enumerate(
+            (
+                ("手机号", self.phone_var, ""),
+                ("验证码", self.code_var, ""),
+                ("二步验证密码", self.password_var, "*"),
+            )
+        ):
+            ttk.Label(self.phone_login_frame, text=label).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 12),
+                pady=7,
+            )
+            ttk.Entry(
+                self.phone_login_frame,
+                textvariable=variable,
+                show=mask,
+            ).grid(row=row, column=1, sticky="ew", pady=7)
+        phone_actions = ttk.Frame(self.phone_login_frame)
+        phone_actions.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.send_code_button = ttk.Button(
+            phone_actions,
+            text="发送验证码",
+            command=self._send_code,
+        )
+        self.send_code_button.pack(side="left", padx=(0, 8))
+        self.login_button = ttk.Button(
+            phone_actions,
+            text="完成登录",
+            command=self._complete_login,
+        )
+        self.login_button.pack(side="left")
+        self.phone_login_frame.grid_remove()
+
+        self.logout_button = ttk.Button(
+            page,
+            text="退出当前账号",
+            command=self._log_out,
+        )
+        self.logout_button.grid(row=9, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.logout_button.grid_remove()
 
     def _build_groups_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=12)
@@ -183,14 +322,321 @@ class DownloaderApp(ttk.Frame):
             api_id=int(self.api_id_var.get().strip()),
             api_hash=self.api_hash_var.get().strip(),
             phone=self.phone_var.get().strip(),
-        ).validate()
+        ).validate_api()
 
-    def _send_code(self) -> None:
+    def _toggle_phone_login(self) -> None:
+        self.phone_login_visible = not self.phone_login_visible
+        if self.phone_login_visible:
+            self.phone_login_frame.grid()
+            text = "收起手机号验证码登录"
+        else:
+            self.phone_login_frame.grid_remove()
+            text = "使用手机号验证码登录"
+        self.phone_toggle_button.configure(text=text)
+
+    def _is_current_qr_generation(self, generation: int) -> bool:
+        return not self._closed and generation == self._qr_generation
+
+    def _start_qr_login(self) -> None:
+        self._qr_generation += 1
+        self._cancel_qr_callbacks()
+        self._begin_qr_login(self._qr_generation)
+
+    def _begin_qr_login(self, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
         try:
             credentials = self._credentials_from_form()
         except Exception as error:
             self._show_error(error)
             return
+        self._set_qr_controls(active=True)
+        self.account_status_var.set("正在生成二维码")
+        self.qr_countdown_var.set("")
+        self.qr_password_frame.grid_remove()
+        self._run_qr_operation(
+            self.controller.start_qr_login(credentials),
+            generation,
+            lambda challenge: self._handle_qr_started(challenge, generation),
+            lambda error: self._handle_qr_terminal_error(error, generation),
+        )
+
+    def _run_qr_operation(
+        self,
+        coroutine,
+        generation: int,
+        on_success,
+        on_error,
+    ) -> None:
+        try:
+            future = self.bridge.submit(coroutine)
+        except Exception as error:
+            on_error(error)
+            return
+        self._qr_wait_future = future
+
+        def poll() -> None:
+            if not self._is_current_qr_generation(generation):
+                future.cancel()
+                if self._qr_wait_future is future:
+                    self._qr_wait_future = None
+                return
+            if not future.done():
+                self.after(100, poll)
+                return
+            if self._qr_wait_future is future:
+                self._qr_wait_future = None
+            try:
+                result = future.result()
+            except CancelledError:
+                return
+            except Exception as error:
+                on_error(error)
+                return
+            on_success(result)
+
+        self.after(100, poll)
+
+    def _handle_qr_started(
+        self,
+        challenge: QrLoginChallenge | None,
+        generation: int,
+    ) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        if challenge is None:
+            self._finish_qr_login("登录成功")
+            return
+        self._show_qr_challenge(challenge, generation)
+
+    def _show_qr_challenge(
+        self,
+        challenge: QrLoginChallenge,
+        generation: int,
+    ) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self._qr_retry_attempt = 0
+        self._qr_expires_at = challenge.expires_at
+        self.qr_password_frame.grid_remove()
+        self.qr_canvas.grid()
+        draw_qr(self.qr_canvas, make_qr_matrix(challenge.url))
+        self.account_status_var.set("请使用 Telegram 扫描二维码")
+        self._schedule_qr_countdown(generation)
+        self._wait_for_qr_login(generation)
+
+    def _schedule_qr_countdown(self, generation: int) -> None:
+        if self._qr_countdown_after is not None:
+            try:
+                self.after_cancel(self._qr_countdown_after)
+            except tk.TclError:
+                pass
+            self._qr_countdown_after = None
+
+        def tick() -> None:
+            self._qr_countdown_after = None
+            if not self._is_current_qr_generation(generation):
+                return
+            expires_at = self._qr_expires_at
+            if expires_at is None:
+                return
+            remaining = seconds_until_expiry(expires_at)
+            self.qr_countdown_var.set(f"二维码剩余 {remaining} 秒")
+            if remaining > 0:
+                self._qr_countdown_after = self.after(1000, tick)
+
+        tick()
+
+    def _wait_for_qr_login(self, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self._run_qr_operation(
+            self.controller.wait_qr_login(),
+            generation,
+            lambda status: self._handle_qr_wait_status(status, generation),
+            lambda error: self._handle_qr_wait_error(error, generation),
+        )
+
+    def _handle_qr_wait_status(self, status: str, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        if status == "需要二步验证密码":
+            self.account_status_var.set(status)
+            self.qr_countdown_var.set("")
+            self.qr_canvas.delete("all")
+            self.qr_canvas.grid_remove()
+            if self._qr_countdown_after is not None:
+                try:
+                    self.after_cancel(self._qr_countdown_after)
+                except tk.TclError:
+                    pass
+                self._qr_countdown_after = None
+            self.qr_password_frame.grid()
+            self.qr_refresh_button.state(["disabled"])
+            return
+        self._finish_qr_login(status)
+
+    def _refresh_qr_login(self, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self.account_status_var.set("正在重新生成二维码")
+        self._run_qr_operation(
+            self.controller.refresh_qr_login(),
+            generation,
+            lambda challenge: self._show_qr_challenge(challenge, generation),
+            lambda error: self._handle_qr_wait_error(error, generation),
+        )
+
+    def _handle_qr_wait_error(self, error: Exception, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        if isinstance(error, QrLoginExpiredError):
+            self._refresh_qr_login(generation)
+            return
+        if isinstance(error, TransientTelegramError):
+            delay = retry_delay(
+                self._qr_retry_attempt,
+                retry_after=error.retry_after,
+            )
+            self._qr_retry_attempt += 1
+            self.account_status_var.set(f"等待网络恢复，{delay} 秒后重试")
+
+            def retry() -> None:
+                self._qr_retry_after = None
+                self._refresh_qr_login(generation)
+
+            self._qr_retry_after = self.after(delay * 1000, retry)
+            return
+        self._handle_qr_terminal_error(error, generation)
+
+    def _handle_qr_terminal_error(self, error: Exception, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self._show_error(error)
+        self.account_status_var.set("登录失败，正在清理连接")
+        self.qr_refresh_button.state(["disabled"])
+        self.qr_cancel_button.state(["disabled"])
+        self._run_qr_operation(
+            self.controller.cancel_login(),
+            generation,
+            lambda _: self._finish_qr_login("登录失败"),
+            lambda _: self._finish_qr_login("登录失败"),
+        )
+
+    def _complete_qr_password(self) -> None:
+        password = self.qr_password_var.get()
+        if not password:
+            self._show_error(ValueError("二步验证密码不能为空"))
+            return
+        generation = self._qr_generation
+        self.qr_password_button.state(["disabled"])
+        self._run_qr_operation(
+            self.controller.complete_qr_password(password),
+            generation,
+            lambda status: self._handle_qr_password_success(status, generation),
+            lambda error: self._handle_qr_password_error(error, generation),
+        )
+
+    def _handle_qr_password_success(self, status: str, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self.qr_password_button.state(["!disabled"])
+        self._finish_qr_login(status)
+
+    def _handle_qr_password_error(self, error: Exception, generation: int) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self.qr_password_button.state(["!disabled"])
+        self.qr_password_var.set("")
+        self.account_status_var.set("二步验证密码错误，请重试")
+        self._show_error(error)
+
+    def _manual_refresh_qr(self) -> None:
+        self._qr_generation += 1
+        generation = self._qr_generation
+        self._cancel_qr_callbacks()
+
+        def restart(_: object) -> None:
+            self._begin_qr_login(generation)
+
+        self._run_qr_operation(
+            self.controller.cancel_login(),
+            generation,
+            restart,
+            lambda error: self._handle_qr_terminal_error(error, generation),
+        )
+
+    def _cancel_qr_login(self) -> None:
+        self._qr_generation += 1
+        generation = self._qr_generation
+        self._cancel_qr_callbacks()
+        self._run_qr_operation(
+            self.controller.cancel_login(),
+            generation,
+            lambda _: self._finish_qr_login("尚未登录"),
+            lambda error: self._handle_qr_terminal_error(error, generation),
+        )
+
+    def _cancel_qr_callbacks(self) -> None:
+        future = self._qr_wait_future
+        self._qr_wait_future = None
+        if future is not None:
+            future.cancel()
+        for attribute in ("_qr_retry_after", "_qr_countdown_after"):
+            after_id = getattr(self, attribute, None)
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, attribute, None)
+
+    def _set_qr_controls(self, *, active: bool) -> None:
+        if active:
+            self.qr_login_button.state(["disabled"])
+            self.qr_refresh_button.state(["!disabled"])
+            self.qr_cancel_button.state(["!disabled"])
+        else:
+            self.qr_login_button.state(["!disabled"])
+            self.qr_refresh_button.state(["disabled"])
+            self.qr_cancel_button.state(["disabled"])
+
+    def _finish_qr_login(self, status: str) -> None:
+        self._cancel_qr_callbacks()
+        self._qr_expires_at = None
+        self._qr_retry_attempt = 0
+        self.qr_canvas.delete("all")
+        self.qr_canvas.grid_remove()
+        self.qr_password_frame.grid_remove()
+        self.qr_countdown_var.set("")
+        self.qr_password_var.set("")
+        self.password_var.set("")
+        self.account_status_var.set(status)
+        self.qr_password_button.state(["!disabled"])
+        self._set_qr_controls(active=False)
+        if status == "登录成功":
+            self.logout_button.grid()
+        else:
+            self.logout_button.grid_remove()
+
+    def _log_out(self) -> None:
+        if not messagebox.askyesno("退出账号", "确认退出当前 Telegram 账号？"):
+            return
+
+        def finished(status: str) -> None:
+            self._finish_qr_login(status)
+
+        self._run_async(self.controller.log_out(), self.logout_button, finished)
+
+    def _send_code(self) -> None:
+        try:
+            credentials = self._credentials_from_form().validate_phone_login()
+        except Exception as error:
+            self._show_error(error)
+            return
+        self._qr_generation += 1
+        self._cancel_qr_callbacks()
+        self._finish_qr_login("尚未登录")
         self._run_async(
             self.controller.send_code(credentials),
             self.send_code_button,
@@ -202,10 +648,11 @@ class DownloaderApp(ttk.Frame):
         password = self.password_var.get()
 
         def finished(status: str) -> None:
-            self.account_status_var.set(status)
             if status == "登录成功":
                 self.code_var.set("")
-                self.password_var.set("")
+                self._finish_qr_login(status)
+            else:
+                self.account_status_var.set(status)
 
         self._run_async(
             self.controller.complete_login(code, password),
@@ -360,6 +807,7 @@ class DownloaderApp(ttk.Frame):
             self.phone_var.get(),
             self.code_var.get(),
             self.password_var.get(),
+            self.qr_password_var.get(),
         ):
             if secret:
                 message = message.replace(secret, "***")
@@ -367,8 +815,22 @@ class DownloaderApp(ttk.Frame):
 
     def close(self) -> None:
         self._closed = True
+        self._qr_generation += 1
+        self._cancel_qr_callbacks()
         if self._status_after is not None:
-            self.after_cancel(self._status_after)
+            try:
+                self.after_cancel(self._status_after)
+            except tk.TclError:
+                pass
+            self._status_after = None
+        try:
+            future = self.bridge.submit(self.controller.cancel_login())
+            future.result(timeout=2)
+        except Exception:
+            pass
+        self.code_var.set("")
+        self.password_var.set("")
+        self.qr_password_var.set("")
         self.bridge.close()
 
 
@@ -385,8 +847,8 @@ def format_doctor_summary(report: DiagnosticReport, saved: Path) -> str:
 def run_gui(paths: ProjectPaths) -> None:
     root = tk.Tk()
     root.title("Telegram 视频自动下载器")
-    root.geometry("860x620")
-    root.minsize(760, 540)
+    root.geometry("900x720")
+    root.minsize(800, 620)
     app = DownloaderApp(root, GuiController(paths, TelethonGateway))
 
     def close_window() -> None:
