@@ -54,3 +54,12 @@ def test_bootstrap_installs_and_verifies_cryptg_inside_project_venv() -> None:
     assert bootstrap.index("$env:PIP_CACHE_DIR") < pip_install
     assert bootstrap.index("$env:PYTHONPYCACHEPREFIX") < pip_install
     assert pip_install < cryptg_check
+
+
+def test_update_script_does_not_reference_user_download_contents() -> None:
+    script = (ROOT / "scripts" / "apply-update.ps1").read_text(encoding="utf-8")
+    lowered = script.lower()
+
+    assert "download_root" not in lowered
+    assert "downloads\\" not in lowered
+    assert "get-childitem" not in lowered
