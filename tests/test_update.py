@@ -12,6 +12,7 @@ from tg_video_downloader.update import (
     ChangedFile,
     GITHUB_URL,
     MODELSCOPE_URL,
+    PreparedRelease,
     UpdateCheckError,
     UpdateManager,
     UpdateRequest,
@@ -337,3 +338,91 @@ def test_update_result_is_validated_and_consumed_once(tmp_path: Path) -> None:
 
     assert consume_update_result(paths) == result
     assert consume_update_result(paths) is None
+
+
+def test_prepare_install_copies_executor_writes_request_and_launches(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    scripts = paths.root / "scripts"
+    scripts.mkdir()
+    source = scripts / "apply-update.ps1"
+    source.write_text("param()\n", encoding="utf-8")
+    prepared = PreparedRelease(
+        release=AvailableRelease(
+            parse_stable_tag("v0.2.0"),
+            "v0.2.0",
+            "测试",
+            "https://example.invalid/repo.git",
+        ),
+        base_commit="1" * 40,
+        target_commit="2" * 40,
+        changes=(),
+    )
+    events: list[str] = []
+    launched: list[tuple[Path, Path, Path]] = []
+
+    def launch(project_root: Path, executor: Path, request_path: Path) -> object:
+        events.append("launch")
+        launched.append((project_root, executor, request_path))
+        assert executor.read_text(encoding="utf-8") == "param()\n"
+        assert read_update_request(paths).target_commit == prepared.target_commit
+        return object()
+
+    manager = UpdateManager(
+        paths=paths,
+        current_version="0.1.0",
+        launch_update=launch,
+    )
+    manager.validate_prepared = lambda value: events.append("validate")
+
+    request = manager.prepare_install(prepared, True)
+
+    assert events == ["validate", "launch"]
+    assert request.restore_service is True
+    assert read_update_request(paths) == request
+    assert launched == [
+        (
+            paths.root,
+            paths.temp / f"update-{request.token}" / "apply-update.ps1",
+            paths.update_request,
+        )
+    ]
+
+
+def test_prepare_install_cleans_only_its_files_when_launch_fails(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    scripts = paths.root / "scripts"
+    scripts.mkdir()
+    (scripts / "apply-update.ps1").write_text("param()\n", encoding="utf-8")
+    prepared = PreparedRelease(
+        release=AvailableRelease(
+            parse_stable_tag("v0.2.0"),
+            "v0.2.0",
+            "测试",
+            "https://example.invalid/repo.git",
+        ),
+        base_commit="1" * 40,
+        target_commit="2" * 40,
+        changes=(),
+    )
+
+    def fail_launch(*_args) -> object:
+        raise OSError("launch failed")
+
+    manager = UpdateManager(
+        paths=paths,
+        current_version="0.1.0",
+        launch_update=fail_launch,
+    )
+    manager.validate_prepared = lambda _value: None
+
+    with pytest.raises(OSError, match="launch failed"):
+        manager.prepare_install(prepared, False)
+
+    assert not paths.update_request.exists()
+    assert list(paths.temp.glob("update-*")) == []

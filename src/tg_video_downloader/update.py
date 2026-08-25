@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -366,3 +368,53 @@ class UpdateManager:
             raise UpdateSafetyError(
                 "目标版本不是当前版本的快进更新"
             ) from error
+
+    def prepare_install(
+        self,
+        prepared: PreparedRelease,
+        restore_service: bool,
+    ) -> UpdateRequest:
+        if self.paths is None:
+            raise UpdateSafetyError("更新操作缺少项目路径")
+        self.validate_prepared(prepared)
+        token = secrets.token_hex(16)
+        request = UpdateRequest(
+            token=token,
+            tag=prepared.release.tag,
+            base_commit=prepared.base_commit,
+            target_commit=prepared.target_commit,
+            restore_service=restore_service,
+        )
+        executor_dir = self.paths.assert_within_root(
+            self.paths.temp / f"update-{token}"
+        )
+        executor = self.paths.assert_within_root(
+            executor_dir / "apply-update.ps1"
+        )
+        try:
+            executor_dir.mkdir(parents=True, exist_ok=False)
+            shutil.copy2(
+                self.paths.root / "scripts" / "apply-update.ps1",
+                executor,
+            )
+            write_update_request(self.paths, request)
+            launcher = self._launch_update
+            if launcher is None:
+                from tg_video_downloader.windows import launch_update_executor
+
+                launcher = launch_update_executor
+            launcher(self.paths.root, executor, self.paths.update_request)
+        except Exception:
+            executor.unlink(missing_ok=True)
+            try:
+                executor_dir.rmdir()
+            except OSError:
+                pass
+            try:
+                owned_request = read_update_request(self.paths)
+            except (OSError, ValueError):
+                owned_request = None
+            if owned_request is not None and owned_request.token == token:
+                self.paths.update_request.unlink(missing_ok=True)
+            raise
+        return request

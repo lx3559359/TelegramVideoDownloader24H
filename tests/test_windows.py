@@ -91,3 +91,70 @@ def test_single_instance_supports_context_specific_error_message(tmp_path: Path)
                 already_running_message="配置器已经在运行",
             ):
                 pass
+
+
+def test_wait_for_downloader_stop_returns_after_lock_releases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    running = iter((True, False))
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        windows,
+        "downloader_is_running",
+        lambda _paths: next(running),
+    )
+
+    windows.wait_for_downloader_stop(
+        paths,
+        monotonic=lambda: 0.0,
+        sleep=sleeps.append,
+    )
+
+    assert sleeps == [0.1]
+
+
+def test_wait_for_downloader_stop_reports_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    times = iter((0.0, 30.0))
+    monkeypatch.setattr(
+        windows,
+        "downloader_is_running",
+        lambda _paths: True,
+    )
+
+    with pytest.raises(TimeoutError, match="30 秒"):
+        windows.wait_for_downloader_stop(
+            paths,
+            monotonic=lambda: next(times),
+            sleep=lambda _seconds: None,
+        )
+
+
+def test_detached_update_executor_has_no_console_or_pipes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    process = object()
+
+    def fake_popen(arguments, **kwargs):
+        captured["arguments"] = arguments
+        captured.update(kwargs)
+        return process
+
+    monkeypatch.setattr(windows.subprocess, "Popen", fake_popen)
+    executor = tmp_path / "apply-update.ps1"
+    request = tmp_path / ".runtime" / "update-request.json"
+
+    assert windows.launch_update_executor(tmp_path, executor, request) is process
+    flags = int(captured["creationflags"])
+    assert flags & windows.subprocess.CREATE_NO_WINDOW
+    assert flags & windows.DETACHED_PROCESS
+    assert captured["stdin"] is windows.subprocess.DEVNULL
+    assert captured["stdout"] is windows.subprocess.DEVNULL
+    assert captured["stderr"] is windows.subprocess.DEVNULL

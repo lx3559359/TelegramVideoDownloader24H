@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -175,6 +176,76 @@ def test_current_download_root_defaults_to_project_downloads(tmp_path: Path) -> 
     controller, paths, _, _ = make_controller(tmp_path)
 
     assert controller.current_download_root() == paths.downloads
+
+
+@pytest.mark.asyncio
+async def test_prepare_update_stops_only_a_previously_running_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, paths, _, process = make_controller(tmp_path)
+    prepared = SimpleNamespace(tag="v0.2.0")
+    installs: list[tuple[object, bool]] = []
+    controller.update_manager = SimpleNamespace(
+        validate_prepared=lambda _value: None,
+        prepare_install=lambda value, restore: installs.append((value, restore)),
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.controller.downloader_is_running",
+        lambda _paths: True,
+    )
+    waited: list[Path] = []
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.controller.wait_for_downloader_stop",
+        lambda value, timeout_seconds=30: waited.append(value),
+    )
+
+    await controller.prepare_update_install(prepared)
+
+    assert process.actions == ["stop"]
+    assert waited == [paths]
+    assert installs == [(prepared, True)]
+
+
+@pytest.mark.asyncio
+async def test_prepare_update_does_not_stop_an_already_stopped_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _, process = make_controller(tmp_path)
+    prepared = SimpleNamespace(tag="v0.2.0")
+    installs: list[tuple[object, bool]] = []
+    controller.update_manager = SimpleNamespace(
+        validate_prepared=lambda _value: None,
+        prepare_install=lambda value, restore: installs.append((value, restore)),
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.controller.downloader_is_running",
+        lambda _paths: False,
+    )
+
+    await controller.prepare_update_install(prepared)
+
+    assert process.actions == []
+    assert installs == [(prepared, False)]
+
+
+@pytest.mark.asyncio
+async def test_prepare_update_rejects_active_login_before_service_control(
+    tmp_path: Path,
+) -> None:
+    controller, _, gateway, process = make_controller(tmp_path)
+    controller._login_gateway = gateway
+    controller.update_manager = SimpleNamespace(
+        validate_prepared=lambda _value: (_ for _ in ()).throw(
+            AssertionError("must not validate during login")
+        )
+    )
+
+    with pytest.raises(ValueError, match="登录"):
+        await controller.prepare_update_install(SimpleNamespace(tag="v0.2.0"))
+
+    assert process.actions == []
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,9 @@ import ctypes
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
+from time import monotonic as monotonic_clock
 from types import TracebackType
 
 from tg_video_downloader.paths import ProjectPaths
@@ -12,6 +14,8 @@ from tg_video_downloader.paths import ProjectPaths
 
 SUPERVISOR_START_OBSERVE_SECONDS = 2.0
 SUPERVISOR_START_POLL_SECONDS = 0.05
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+DETACHED_PROCESS = subprocess.DETACHED_PROCESS
 
 
 class SingleInstance:
@@ -102,6 +106,50 @@ def clear_stop(paths: ProjectPaths) -> None:
 
 def is_stop_requested(paths: ProjectPaths) -> bool:
     return paths.assert_within_root(paths.stop_flag).is_file()
+
+
+def downloader_is_running(paths: ProjectPaths) -> bool:
+    return _file_is_locked(paths.runtime / "downloader.lock")
+
+
+def wait_for_downloader_stop(
+    paths: ProjectPaths,
+    timeout_seconds: float = 30.0,
+    *,
+    monotonic: Callable[[], float] = monotonic_clock,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    deadline = monotonic() + timeout_seconds
+    while downloader_is_running(paths):
+        if monotonic() >= deadline:
+            raise TimeoutError("后台下载器未在 30 秒内停止")
+        sleep(0.1)
+
+
+def launch_update_executor(
+    project_root: Path,
+    executor: Path,
+    request_path: Path,
+) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        (
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(executor),
+            "-ProjectRoot",
+            str(project_root),
+            "-RequestPath",
+            str(request_path),
+        ),
+        cwd=project_root,
+        creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def start_hidden_supervisor(project_root: Path) -> subprocess.Popen[bytes]:

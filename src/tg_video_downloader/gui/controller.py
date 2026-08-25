@@ -8,7 +8,7 @@ from concurrent.futures import Future
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from tg_video_downloader.config import ConfigStore
 from tg_video_downloader.diagnostics import DiagnosticReport, Doctor
@@ -26,9 +26,14 @@ from tg_video_downloader.storage import (
 )
 from tg_video_downloader.windows import (
     clear_stop,
+    downloader_is_running,
     request_stop,
     start_hidden_supervisor,
+    wait_for_downloader_stop,
 )
+
+if TYPE_CHECKING:
+    from tg_video_downloader.update import PreparedRelease, UpdateManager, UpdateResult
 
 
 T = TypeVar("T")
@@ -111,6 +116,7 @@ class GuiController:
         self.process_control = process_control or WindowsProcessControl()
         self._login_gateway: TelegramGateway | None = None
         self._login_credentials: Credentials | None = None
+        self.update_manager: UpdateManager | None = None
 
     def load_credentials(self) -> Credentials | None:
         try:
@@ -311,6 +317,43 @@ class GuiController:
 
     def stop(self) -> None:
         self.process_control.request_stop(self.paths)
+
+    def _get_update_manager(self) -> UpdateManager:
+        if self.update_manager is None:
+            from tg_video_downloader.update import UpdateManager
+
+            self.update_manager = UpdateManager(paths=self.paths)
+        return self.update_manager
+
+    async def check_for_update(self) -> PreparedRelease | None:
+        return await asyncio.to_thread(self._get_update_manager().prepare_latest)
+
+    async def prepare_update_install(self, prepared: PreparedRelease) -> None:
+        if self.login_active:
+            raise ValueError("请先完成或取消当前登录任务")
+        manager = self._get_update_manager()
+        await asyncio.to_thread(manager.validate_prepared, prepared)
+        restore_service = downloader_is_running(self.paths)
+        if restore_service:
+            self.process_control.request_stop(self.paths)
+            try:
+                await asyncio.to_thread(wait_for_downloader_stop, self.paths)
+            except Exception:
+                self.process_control.clear_stop(self.paths)
+                if not downloader_is_running(self.paths):
+                    self.process_control.start(self.paths.root)
+                raise
+        try:
+            await asyncio.to_thread(
+                manager.prepare_install,
+                prepared,
+                restore_service,
+            )
+        except Exception:
+            if restore_service:
+                self.process_control.clear_stop(self.paths)
+                self.process_control.start(self.paths.root)
+            raise
 
     async def run_doctor(self) -> tuple[DiagnosticReport, Path]:
         doctor = Doctor(
