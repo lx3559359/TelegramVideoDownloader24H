@@ -1,5 +1,7 @@
 config_poll_seconds = 5
 prevent_sleep = true
+# 可选：必须是可写的本地绝对路径，不支持 UNC 网络共享。
+# download_root = "D:\\TelegramVideos"
 
 [[groups]]
 chat_id = -1001234567890

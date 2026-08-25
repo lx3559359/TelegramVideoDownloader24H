@@ -125,6 +125,7 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
         "dependencies",
         "qr_code",
         "tray_icon",
+        "update_support",
         "login_task",
         "config",
         "credentials",
@@ -133,11 +134,11 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
         "heartbeat",
         "telegram",
     }
-    assert report.exit_code == 0
+    assert report.exit_code == 1
     assert saved.resolve().is_relative_to(paths.root)
     assert saved.parent == paths.logs / "diagnostics"
     serialized = saved.read_text(encoding="utf-8")
-    assert json.loads(serialized)["exit_code"] == 0
+    assert json.loads(serialized)["exit_code"] == 1
     assert group.title not in serialized
     assert str(group.chat_id) not in serialized
     assert "doctor-probe" not in serialized
@@ -289,7 +290,7 @@ async def test_project_path_failure_is_reported_without_aborting_other_checks(
 
     assert checks["project_paths"].status == "fail"
     assert checks["telegram"].status == "pass"
-    assert len(report.checks) == 12
+    assert len(report.checks) == 13
 
 
 @pytest.mark.asyncio
@@ -364,3 +365,57 @@ async def test_invisible_whitelisted_group_fails_online_check(tmp_path: Path) ->
     assert "1 个白名单目标" in telegram.message
     assert group.title not in telegram.message
     assert str(group.chat_id) not in telegram.message
+
+
+def test_update_diagnostic_never_queries_a_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(arguments, **_kwargs):
+        calls.append(tuple(str(item) for item in arguments))
+        return SimpleNamespace(stdout="master\n", returncode=0)
+
+    monkeypatch.setattr(
+        "tg_video_downloader.diagnostics.shutil.which",
+        lambda name: name,
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.diagnostics.subprocess.run",
+        fake_run,
+    )
+    paths = ProjectPaths.from_root(tmp_path)
+    (paths.root / "scripts").mkdir(parents=True)
+    (paths.root / "scripts" / "apply-update.ps1").write_text(
+        "param()\n",
+        encoding="utf-8",
+    )
+
+    check = Doctor(
+        paths,
+        gateway_factory=lambda *_: FakeTelegramGateway(),
+    )._check_update_support()
+
+    assert check.status == "pass"
+    assert calls
+    assert all("ls-remote" not in call for call in calls)
+
+
+def test_update_diagnostic_warns_when_local_components_are_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tg_video_downloader.diagnostics.shutil.which",
+        lambda _name: None,
+    )
+    doctor = Doctor(
+        ProjectPaths.from_root(tmp_path),
+        gateway_factory=lambda *_: FakeTelegramGateway(),
+    )
+
+    check = doctor._check_update_support()
+
+    assert check.status == "warning"
+    assert "在线更新不可用" in check.message

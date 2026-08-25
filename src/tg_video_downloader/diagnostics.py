@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -90,6 +91,7 @@ class Doctor:
             self._run_local("dependencies", self._check_dependencies),
             self._run_local("qr_code", self._check_qr_code),
             self._run_local("tray_icon", self._check_tray_icon),
+            self._run_local("update_support", self._check_update_support),
             self._run_local("login_task", self._check_login_task),
         ]
 
@@ -252,6 +254,40 @@ class Doctor:
                 "图形界面存在进行中的登录任务",
             )
         return DiagnosticCheck("login_task", "pass", "没有未清理的登录任务")
+
+    def _check_update_support(self) -> DiagnosticCheck:
+        git = shutil.which("git")
+        powershell = shutil.which("powershell.exe")
+        script = self.paths.root / "scripts" / "apply-update.ps1"
+        if git is None or powershell is None or not script.is_file():
+            missing = [
+                name
+                for name, present in (
+                    ("Git", git is not None),
+                    ("PowerShell", powershell is not None),
+                    ("apply-update.ps1", script.is_file()),
+                )
+                if not present
+            ]
+            return DiagnosticCheck(
+                "update_support",
+                "warning",
+                "在线更新不可用：" + "、".join(missing),
+            )
+        branch = subprocess.run(
+            (git, "-C", str(self.paths.root), "branch", "--show-current"),
+            check=False,
+            capture_output=True,
+            text=True,
+            shell=False,
+        ).stdout.strip()
+        package_version = version("telegram-video-downloader")
+        status: DiagnosticStatus = "pass" if branch == "master" else "warning"
+        return DiagnosticCheck(
+            "update_support",
+            status,
+            f"手动更新组件可用，版本 {package_version}，分支 {branch or '-'}",
+        )
 
     def _load_config(
         self,
