@@ -95,7 +95,7 @@ async def test_hot_reload_applies_valid_config_and_ignores_invalid(
     class WaitingWorker:
         current_file = None
 
-        def __init__(self, paths, state, telegram_gateway) -> None:
+        def __init__(self, paths, state, telegram_gateway, **_kwargs) -> None:
             pass
 
         def recover(self) -> int:

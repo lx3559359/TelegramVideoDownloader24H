@@ -19,6 +19,7 @@ from tg_video_downloader.models import AppConfig, Credentials
 from tg_video_downloader.observability import HeartbeatWriter, configure_logging
 from tg_video_downloader.paths import ProjectPaths
 from tg_video_downloader.state import StateStore
+from tg_video_downloader.storage import effective_download_root
 from tg_video_downloader.windows import (
     PreventIdleSleep,
     SingleInstance,
@@ -82,8 +83,17 @@ class DownloaderService:
         tasks: list[asyncio.Task[None]] = []
         status = "stopped"
         worker: DownloadWorker | None = None
+        config_holder = [config]
         try:
-            worker = DownloadWorker(self.paths, state, gateway)
+            worker = DownloadWorker(
+                self.paths,
+                state,
+                gateway,
+                download_root=lambda: effective_download_root(
+                    self.paths,
+                    config_holder[0],
+                ),
+            )
             coordinator = ScannerCoordinator(state, gateway)
             recovered = worker.recover()
             logger.info("恢复了 %d 个中断下载任务", recovered)
@@ -95,7 +105,6 @@ class DownloaderService:
 
             reloader = config_store.reloader()
             reloader.load_if_changed()
-            config_holder = [config]
             heartbeat.write(self._snapshot("running", state, worker=worker))
             tasks = [
                 asyncio.create_task(coordinator.run_scans(stop), name="history-scans"),

@@ -291,7 +291,8 @@ async def test_service_hot_reload_resumes_paused_history_after_live_download(
             )
         )
 
-        await asyncio.wait_for(history_completed.wait(), timeout=2)
+        # Config reload and an idle worker wake-up can each consume one second.
+        await asyncio.wait_for(history_completed.wait(), timeout=3)
         history_final_path = build_final_path(paths, GROUP_A.title, history)
         await _wait_until(history_final_path.is_file, timeout=2)
         assert history_final_path.is_file()
@@ -366,6 +367,116 @@ async def test_service_stop_cancels_active_download_and_preserves_partial(
         reopened.close()
 
 
+@pytest.mark.asyncio
+async def test_service_hot_reload_changes_root_only_for_future_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path / "project")
+    paths.ensure_directories()
+    root_a = (tmp_path / "root-a").resolve()
+    root_b = (tmp_path / "root-b").resolve()
+    first = video(GROUP_A.chat_id, 30)
+    second = video(GROUP_A.chat_id, 31)
+    config_store = ConfigStore(paths)
+    config_store.save_credentials(Credentials(12345, "hash"))
+    config_store.save_config(
+        AppConfig(
+            groups=(GROUP_A,),
+            config_poll_seconds=1,
+            download_root=root_a,
+        )
+    )
+    state = StateStore(paths.database)
+    state.reconcile_targets((GROUP_A,))
+    state.upsert_job(first, GROUP_A.title, JobSource.LIVE)
+    state.close()
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_completed = asyncio.Event()
+    config_reloaded = asyncio.Event()
+
+    class BlockingFirstGateway(FakeTelegramGateway):
+        async def download_message(self, chat_id, message_id, destination, **kwargs):
+            if message_id == first.message_id:
+                first_started.set()
+                await release_first.wait()
+            result = await super().download_message(
+                chat_id,
+                message_id,
+                destination,
+                **kwargs,
+            )
+            if message_id == second.message_id:
+                second_completed.set()
+            return result
+
+    original_apply_targets = ScannerCoordinator.apply_targets
+    apply_count = 0
+
+    async def recording_apply_targets(self, targets):
+        nonlocal apply_count
+        result = await original_apply_targets(self, targets)
+        apply_count += 1
+        if apply_count >= 2:
+            config_reloaded.set()
+        return result
+
+    monkeypatch.setattr(
+        ScannerCoordinator,
+        "apply_targets",
+        recording_apply_targets,
+    )
+    gateway = BlockingFirstGateway()
+    gateway.download_payloads[(first.chat_id, first.message_id)] = b"video--1001-30"
+    gateway.download_payloads[(second.chat_id, second.message_id)] = b"video--1001-31"
+    service_task = asyncio.create_task(
+        DownloaderService(paths, lambda *_: gateway).run()
+    )
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=2)
+        config_store.save_config(
+            AppConfig(
+                groups=(GROUP_A,),
+                config_poll_seconds=1,
+                download_root=root_b,
+            )
+        )
+        await asyncio.wait_for(config_reloaded.wait(), timeout=3)
+        observer = StateStore(paths.database)
+        try:
+            observer.upsert_job(second, GROUP_A.title, JobSource.LIVE)
+        finally:
+            observer.close()
+        release_first.set()
+        await asyncio.wait_for(second_completed.wait(), timeout=3)
+        first_final = build_final_path(
+            paths,
+            GROUP_A.title,
+            first,
+            download_root=root_a,
+        )
+        second_final = build_final_path(
+            paths,
+            GROUP_A.title,
+            second,
+            download_root=root_b,
+        )
+        await _wait_until(first_final.is_file, timeout=2)
+        await _wait_until(second_final.is_file, timeout=2)
+        observer = StateStore(paths.database)
+        try:
+            first_job = observer.get_job(first.chat_id, first.message_id)
+            second_job = observer.get_job(second.chat_id, second.message_id)
+            assert first_job is not None and first_job.output_root == root_a
+            assert second_job is not None and second_job.output_root == root_b
+        finally:
+            observer.close()
+    finally:
+        release_first.set()
+        request_stop(paths)
+        assert await asyncio.wait_for(service_task, timeout=3) == 0
 def test_all_generated_paths_stay_inside_project_root(tmp_path: Path) -> None:
     paths = ProjectPaths.from_root(tmp_path)
     paths.ensure_directories()
