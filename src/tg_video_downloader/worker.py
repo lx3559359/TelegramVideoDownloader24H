@@ -101,6 +101,7 @@ class DownloadWorker:
                 self.state.mark_completed(job, final_path)
                 return "completed"
 
+            download_task: asyncio.Task[Path] | None = None
             try:
                 offset = _resume_offset(part_path, job.message.size)
                 if job.message.size is not None and offset == job.message.size:
@@ -185,6 +186,12 @@ class DownloadWorker:
                 if not _matches_expected_size(part_path, job.message.size):
                     raise TransientTelegramError("下载文件大小与 Telegram 元数据不一致")
                 os.replace(part_path, final_path)
+            except asyncio.CancelledError:
+                if download_task is not None and not download_task.done():
+                    download_task.cancel()
+                    await asyncio.gather(download_task, return_exceptions=True)
+                self.state.release(job)
+                raise
             except AuthenticationRequiredError:
                 raise
             except PermanentMessageError as error:

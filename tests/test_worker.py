@@ -407,6 +407,47 @@ async def test_stop_cancels_download_and_releases_job(tmp_path: Path) -> None:
         state.close()
 
 
+@pytest.mark.asyncio
+async def test_parent_cancellation_cancels_download_and_releases_job(
+    tmp_path: Path,
+) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    message = make_video(1, size=100)
+    state.upsert_job(message, "群", JobSource.LIVE)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    active_download: list[asyncio.Task] = []
+
+    async def blocked(*_args, **_kwargs):
+        active_download.append(asyncio.current_task())
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    gateway.download_message = blocked
+    worker = DownloadWorker(paths, state, gateway, monitor_seconds=0.005)
+    task = asyncio.create_task(worker.run_one())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        assert cancelled.is_set()
+        assert state.claim_next() is not None
+    finally:
+        for download_task in active_download:
+            if download_task is not None and not download_task.done():
+                download_task.cancel()
+                await asyncio.wait_for(
+                    asyncio.gather(download_task, return_exceptions=True),
+                    timeout=1,
+                )
+        state.close()
+
+
 def test_recover_preserves_partial_file(tmp_path: Path) -> None:
     paths, state, gateway = prepare(tmp_path)
     message = make_video(1)
