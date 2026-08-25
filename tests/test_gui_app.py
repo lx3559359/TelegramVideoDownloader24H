@@ -319,6 +319,17 @@ def test_application_version_reads_package_metadata(
     assert app_module.application_version() == "0.2.0"
 
 
+def test_show_update_page_selects_dedicated_tab() -> None:
+    selected: list[object] = []
+    app = object.__new__(DownloaderApp)
+    app.update_page = object()
+    app.notebook = SimpleNamespace(select=selected.append)
+
+    app.show_update_page()
+
+    assert selected == [app.update_page]
+
+
 def test_show_prepared_release_enables_install_and_lists_changes() -> None:
     app = object.__new__(DownloaderApp)
     app.update_status_var = FakeVar()
@@ -501,7 +512,11 @@ def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None
     app.progress_bar_var = FakeVar()
     app.progress_bar_label_var = FakeVar()
     app.group_status = FakeText()
-    app.after = lambda *_args: "after-status"
+    scheduled: list[tuple[int, object]] = []
+    app.after = (
+        lambda delay, callback: scheduled.append((delay, callback))
+        or "after-status"
+    )
 
     app._refresh_status()
 
@@ -514,6 +529,8 @@ def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None
     assert app.status_vars["paused_history"].get() == "3"
     assert app.group_status.value == "频道：监听新内容；历史下载已暂停"
     assert published[0]["status"] == "running"
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 2000
 
 
 def test_status_read_error_is_published_for_tray_recovery() -> None:

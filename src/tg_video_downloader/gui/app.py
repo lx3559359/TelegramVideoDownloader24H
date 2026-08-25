@@ -154,6 +154,7 @@ class DownloaderApp(ttk.Frame):
         self._build_account_page()
         self._build_groups_page()
         self._build_run_page()
+        self._build_update_page()
         update_result = self.controller.consume_update_result()
         if update_result is not None:
             title = (
@@ -424,67 +425,6 @@ class DownloaderApp(ttk.Frame):
             command=lambda: self._call_sync(self.controller.open_downloads),
         ).grid(row=0, column=3)
 
-        updates = ttk.LabelFrame(page, text="软件更新", padding=10)
-        updates.pack(fill="x", pady=(0, 16))
-        updates.columnconfigure(1, weight=1)
-        ttk.Label(updates, text="当前版本").grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(0, 10),
-        )
-        ttk.Label(updates, text=application_version()).grid(
-            row=0,
-            column=1,
-            sticky="w",
-        )
-        self.update_check_button = ttk.Button(
-            updates,
-            text="检查更新",
-            command=self._check_for_update,
-        )
-        self.update_check_button.grid(row=0, column=2, padx=(8, 0))
-        self.update_install_button = ttk.Button(
-            updates,
-            text="安装完整更新",
-            command=self._install_update,
-        )
-        self.update_install_button.grid(row=0, column=3, padx=(8, 0))
-        self.update_install_button.state(["disabled"])
-        self.update_status_var = tk.StringVar(value="仅在手动检查时联网")
-        ttk.Label(updates, textvariable=self.update_status_var).grid(
-            row=1,
-            column=0,
-            columnspan=4,
-            sticky="w",
-            pady=(8, 6),
-        )
-        self.update_search_var = tk.StringVar()
-        self.update_search_var.trace_add(
-            "write",
-            lambda *_args: self._render_update_changes(),
-        )
-        ttk.Entry(
-            updates,
-            textvariable=self.update_search_var,
-        ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 6))
-        self.update_changes = ttk.Treeview(
-            updates,
-            columns=("status", "path"),
-            show="headings",
-            height=4,
-        )
-        self.update_changes.heading("status", text="状态")
-        self.update_changes.heading("path", text="变更文件（搜索仅用于预览）")
-        self.update_changes.column(
-            "status",
-            width=60,
-            anchor="center",
-            stretch=False,
-        )
-        self.update_changes.column("path", width=620)
-        self.update_changes.grid(row=3, column=0, columnspan=4, sticky="ew")
-
         self.status_vars = {
             "status": tk.StringVar(value="stopped"),
             "updated_at": tk.StringVar(value="-"),
@@ -542,6 +482,84 @@ class DownloaderApp(ttk.Frame):
         self.group_status = tk.Text(page, height=10, wrap="word", state="disabled")
         self.group_status.pack(fill="both", expand=True)
 
+    def _build_update_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=18)
+        self.update_page = page
+        self.notebook.add(page, text="更新")
+        page.columnconfigure(1, weight=1)
+        page.rowconfigure(4, weight=1)
+        ttk.Label(page, text="当前版本").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+        )
+        ttk.Label(page, text=application_version()).grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+        self.update_check_button = ttk.Button(
+            page,
+            text="检查更新",
+            command=self._check_for_update,
+        )
+        self.update_check_button.grid(row=0, column=2, padx=(8, 0))
+        self.update_install_button = ttk.Button(
+            page,
+            text="安装完整更新",
+            command=self._install_update,
+        )
+        self.update_install_button.grid(row=0, column=3, padx=(8, 0))
+        self.update_install_button.state(["disabled"])
+        self.update_status_var = tk.StringVar(value="仅在手动检查时联网")
+        ttk.Label(page, textvariable=self.update_status_var).grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(14, 8),
+        )
+        ttk.Label(
+            page,
+            text="搜索只过滤下面的变更预览；安装始终应用完整稳定版本。",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        self.update_search_var = tk.StringVar()
+        self.update_search_var.trace_add(
+            "write",
+            lambda *_args: self._render_update_changes(),
+        )
+        ttk.Entry(
+            page,
+            textvariable=self.update_search_var,
+        ).grid(row=3, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        tree_frame = ttk.Frame(page)
+        tree_frame.grid(row=4, column=0, columnspan=4, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+        self.update_changes = ttk.Treeview(
+            tree_frame,
+            columns=("status", "path"),
+            show="headings",
+        )
+        self.update_changes.heading("status", text="状态")
+        self.update_changes.heading("path", text="变更文件")
+        self.update_changes.column(
+            "status",
+            width=60,
+            anchor="center",
+            stretch=False,
+        )
+        self.update_changes.column("path", width=620)
+        self.update_changes.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(
+            tree_frame,
+            orient="vertical",
+            command=self.update_changes.yview,
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.update_changes.configure(yscrollcommand=scrollbar.set)
+
     def _choose_download_root(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.download_root_var.get())
         if selected:
@@ -557,7 +575,7 @@ class DownloaderApp(ttk.Frame):
         self._call_sync(save)
 
     def show_update_page(self) -> None:
-        self.notebook.select(self.run_page)
+        self.notebook.select(self.update_page)
 
     def set_update_exit(self, callback: Callable[[], None]) -> None:
         self._request_update_exit = callback
