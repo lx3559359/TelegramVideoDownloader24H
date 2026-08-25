@@ -31,6 +31,13 @@ def _read_toml(path: Path) -> dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def _download_history(group: dict[str, Any]) -> bool:
+    value = group.get("download_history", True)
+    if not isinstance(value, bool):
+        raise ValueError("download_history 必须是布尔值")
+    return value
+
+
 class ConfigStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -51,7 +58,11 @@ class ConfigStore:
         if not isinstance(groups_data, list):
             raise ValueError("groups 必须是群组/频道列表")
         groups = tuple(
-            GroupTarget(chat_id=int(group["chat_id"]), title=str(group["title"]))
+            GroupTarget(
+                chat_id=int(group["chat_id"]),
+                title=str(group["title"]),
+                download_history=_download_history(group),
+            )
             for group in groups_data
         )
         return AppConfig(
@@ -72,6 +83,7 @@ class ConfigStore:
                     "[[groups]]",
                     f"chat_id = {group.chat_id}",
                     f"title = {_quoted(group.title)}",
+                    f"download_history = {str(group.download_history).lower()}",
                 ]
             )
         _atomic_write(self.paths.config, "\n".join(lines) + "\n")

@@ -23,6 +23,7 @@ class JobStatus(StrEnum):
 class GroupTarget:
     chat_id: int
     title: str
+    download_history: bool = True
 
 
 @dataclass(frozen=True)

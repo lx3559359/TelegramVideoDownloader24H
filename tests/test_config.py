@@ -20,6 +20,41 @@ def test_round_trip_config_and_credentials(tmp_path: Path) -> None:
     assert "secret-hash" not in (tmp_path / "config.toml").read_text(encoding="utf-8")
 
 
+def test_legacy_group_defaults_history_to_enabled(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.config.write_text(
+        '[[groups]]\nchat_id = -1001\ntitle = "旧频道"\n',
+        encoding="utf-8",
+    )
+
+    assert ConfigStore(paths).load_config().groups == (
+        GroupTarget(-1001, "旧频道", download_history=True),
+    )
+
+
+def test_history_policy_round_trips_explicitly(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    store = ConfigStore(paths)
+    config = AppConfig(groups=(GroupTarget(-1001, "频道", False),))
+
+    store.save_config(config)
+
+    assert store.load_config() == config
+    assert "download_history = false" in paths.config.read_text(encoding="utf-8")
+
+
+def test_history_policy_must_be_boolean(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.config.write_text(
+        '[[groups]]\nchat_id = -1001\ntitle = "频道"\n'
+        'download_history = "yes"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="download_history"):
+        ConfigStore(paths).load_config()
+
+
 def test_qr_credentials_allow_empty_phone_but_phone_login_rejects_it() -> None:
     credentials = Credentials(api_id=12345, api_hash="secret-hash")
 
