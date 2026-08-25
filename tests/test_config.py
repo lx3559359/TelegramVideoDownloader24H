@@ -5,6 +5,7 @@ import pytest
 from tg_video_downloader.config import ConfigStore
 from tg_video_downloader.models import AppConfig, Credentials, GroupTarget
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.storage import effective_download_root
 
 
 def test_round_trip_config_and_credentials(tmp_path: Path) -> None:
@@ -91,3 +92,34 @@ def test_reloader_keeps_last_valid_config(tmp_path: Path) -> None:
     paths.config.write_text("[[groups]\n", encoding="utf-8")
     assert reloader.load_if_changed() == valid
     assert reloader.last_error is not None
+
+
+def test_old_config_uses_project_downloads(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.config.write_text("config_poll_seconds = 5\n", encoding="utf-8")
+
+    config = ConfigStore(paths).load_config()
+
+    assert config.download_root is None
+    assert effective_download_root(paths, config) == paths.downloads
+
+
+def test_config_round_trips_external_download_root(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path / "project")
+    selected = (tmp_path / "媒体 目录").resolve()
+    store = ConfigStore(paths)
+
+    store.save_config(AppConfig(download_root=selected))
+
+    assert store.load_config().download_root == selected
+    assert str(selected).replace("\\", "\\\\") in paths.config.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_download_root_must_be_a_string(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.config.write_text("download_root = 123\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="download_root"):
+        ConfigStore(paths).load_config()

@@ -8,6 +8,7 @@ from typing import Any
 
 from tg_video_downloader.models import AppConfig, Credentials, GroupTarget
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.storage import parse_download_root
 
 
 def _quoted(value: str) -> str:
@@ -54,6 +55,18 @@ class ConfigStore:
         if not isinstance(prevent_sleep, bool):
             raise ValueError("prevent_sleep 必须是布尔值")
 
+        download_root_value = data.get("download_root")
+        if download_root_value is not None and not isinstance(
+            download_root_value,
+            str,
+        ):
+            raise ValueError("download_root 必须是路径字符串")
+        download_root = (
+            None
+            if download_root_value is None
+            else parse_download_root(self.paths, download_root_value)
+        )
+
         groups_data = data.get("groups", [])
         if not isinstance(groups_data, list):
             raise ValueError("groups 必须是群组/频道列表")
@@ -69,6 +82,7 @@ class ConfigStore:
             groups=groups,
             config_poll_seconds=poll_seconds,
             prevent_sleep=prevent_sleep,
+            download_root=download_root,
         )
 
     def save_config(self, config: AppConfig) -> None:
@@ -76,6 +90,8 @@ class ConfigStore:
             f"config_poll_seconds = {config.config_poll_seconds}",
             f"prevent_sleep = {str(config.prevent_sleep).lower()}",
         ]
+        if config.download_root is not None:
+            lines.append(f"download_root = {_quoted(str(config.download_root))}")
         for group in config.groups:
             lines.extend(
                 [

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 
 
 class JobSource(StrEnum):
@@ -31,6 +32,7 @@ class AppConfig:
     groups: tuple[GroupTarget, ...] = ()
     config_poll_seconds: int = 5
     prevent_sleep: bool = True
+    download_root: Path | None = None
 
     def require_targets(self) -> "AppConfig":
         if not self.groups:
