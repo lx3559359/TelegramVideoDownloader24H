@@ -153,7 +153,8 @@ try {
     if ($porcelain) {
         throw [System.InvalidOperationException]::new('Git worktree is not clean.')
     }
-    $tagTarget = (@(Invoke-Checked { & git -C $ProjectRoot rev-list -n 1 ("refs/tags/{0}" -f $Request.tag) } 'read-tag') -join "`n").Trim()
+    $releaseRef = "refs/tg-video-downloader/releases/{0}" -f $Request.tag
+    $tagTarget = (@(Invoke-Checked { & git -C $ProjectRoot rev-list -n 1 $releaseRef } 'read-tag') -join "`n").Trim()
     if ($tagTarget -ne $Request.target_commit) {
         throw [System.InvalidOperationException]::new('Stable tag target changed.')
     }

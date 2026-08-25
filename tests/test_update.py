@@ -261,6 +261,37 @@ def test_prepare_release_fetches_validates_and_filters_changes(
     assert filter_changes(prepared.changes, "GUI") == (prepared.changes[1],)
 
 
+def test_prepare_release_preserves_conflicting_local_tag(
+    update_repository: UpdateRepository,
+) -> None:
+    git(
+        update_repository.project,
+        "tag",
+        "v0.2.0",
+        update_repository.base_commit,
+    )
+    manager = UpdateManager(
+        paths=ProjectPaths.from_root(update_repository.project),
+        current_version="0.1.0",
+    )
+
+    prepared = manager.prepare_release(make_release(update_repository))
+
+    assert prepared.target_commit == update_repository.release_commit
+    assert (
+        git(update_repository.project, "rev-parse", "refs/tags/v0.2.0")
+        == update_repository.base_commit
+    )
+    assert (
+        git(
+            update_repository.project,
+            "rev-parse",
+            "refs/tg-video-downloader/releases/v0.2.0",
+        )
+        == update_repository.release_commit
+    )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [

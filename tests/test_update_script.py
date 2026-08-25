@@ -92,6 +92,12 @@ exit 0
     (project / "release.txt").write_text("v0.2.0\n", encoding="utf-8")
     target = commit_all(project, "release")
     git(project, "tag", "v0.2.0", target)
+    git(
+        project,
+        "update-ref",
+        "refs/tg-video-downloader/releases/v0.2.0",
+        target,
+    )
     git(project, "switch", "master")
 
     paths = ProjectPaths.from_root(project)
@@ -166,6 +172,7 @@ def test_update_script_has_safe_transaction_contract() -> None:
         "[Parameter(Mandatory = $true)][string]$RequestPath",
         "Resolve-Path -LiteralPath",
         "gui.lock",
+        "refs/tg-video-downloader/releases/",
         "merge --ff-only",
         "bootstrap.ps1",
         "update-ref",

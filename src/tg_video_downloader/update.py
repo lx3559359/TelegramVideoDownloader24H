@@ -307,17 +307,18 @@ class UpdateManager:
         ).strip():
             raise UpdateSafetyError("工作区不干净，拒绝在线更新")
         base_commit = self._run(("git", "rev-parse", "HEAD")).strip()
+        release_ref = f"refs/tg-video-downloader/releases/{release.tag}"
         self._run(
             (
                 "git",
                 "fetch",
                 "--no-tags",
                 release.remote_url,
-                f"refs/tags/{release.tag}:refs/tags/{release.tag}",
+                f"refs/tags/{release.tag}:{release_ref}",
             )
         )
         target_commit = self._run(
-            ("git", "rev-list", "-n", "1", f"refs/tags/{release.tag}")
+            ("git", "rev-list", "-n", "1", release_ref)
         ).strip()
         try:
             self._run(
@@ -366,7 +367,7 @@ class UpdateManager:
                 "rev-list",
                 "-n",
                 "1",
-                f"refs/tags/{prepared.release.tag}",
+                f"refs/tg-video-downloader/releases/{prepared.release.tag}",
             )
         ).strip()
         if target != prepared.target_commit:
