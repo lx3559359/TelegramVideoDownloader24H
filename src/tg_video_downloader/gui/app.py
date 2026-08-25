@@ -6,7 +6,7 @@ from concurrent.futures import CancelledError, Future
 from datetime import datetime
 from math import isfinite
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from tg_video_downloader.diagnostics import DiagnosticReport
@@ -81,6 +81,37 @@ def format_download_progress(progress: object) -> tuple[str, str]:
         f"{_format_bytes(downloaded)} / {total_text}{suffix}",
         f"{_format_bytes(speed)}/s",
     )
+
+
+def progress_bar_presentation(snapshot: object) -> tuple[float, str]:
+    safe = snapshot if isinstance(snapshot, dict) else {}
+    status = safe.get("status", "stopped")
+    progress = safe.get("progress")
+    details = progress if isinstance(progress, dict) else {}
+    percent = details.get("percent")
+    valid = (
+        not isinstance(percent, bool)
+        and isinstance(percent, (int, float))
+        and isfinite(percent)
+        and percent >= 0
+    )
+    value = min(100.0, float(percent)) if valid else 0.0
+    if status == "stale":
+        return value, "心跳异常"
+    if status != "running":
+        labels = {
+            "stopped": "后台已停止",
+            "needs_login": "需要重新登录",
+            "needs_config": "配置无效",
+            "error": "后台错误",
+            "starting": "正在启动",
+        }
+        return value, labels.get(str(status), "状态不可用")
+    if valid:
+        return value, f"{value:.1f}%"
+    if safe.get("current_file"):
+        return 0.0, "正在准备"
+    return 0.0, "等待任务"
 
 
 class DownloaderApp(ttk.Frame):
@@ -334,7 +365,6 @@ class DownloaderApp(ttk.Frame):
         for text, command in (
             ("启动后台", self._start_service),
             ("停止后台", self._stop_service),
-            ("打开下载目录", self.controller.open_downloads),
             ("打开日志目录", self.controller.open_logs),
         ):
             ttk.Button(actions, text=text, command=lambda fn=command: self._call_sync(fn)).pack(
@@ -346,6 +376,34 @@ class DownloaderApp(ttk.Frame):
             command=self._run_doctor,
         )
         self.doctor_button.pack(side="left")
+
+        self.download_root_var = tk.StringVar(
+            value=str(self.controller.current_download_root())
+        )
+        storage = ttk.LabelFrame(page, text="下载保存位置", padding=10)
+        storage.pack(fill="x", pady=(0, 16))
+        storage.columnconfigure(0, weight=1)
+        ttk.Entry(storage, textvariable=self.download_root_var).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 8),
+        )
+        ttk.Button(
+            storage,
+            text="选择文件夹",
+            command=self._choose_download_root,
+        ).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(
+            storage,
+            text="保存位置",
+            command=self._save_download_root,
+        ).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(
+            storage,
+            text="打开目录",
+            command=lambda: self._call_sync(self.controller.open_downloads),
+        ).grid(row=0, column=3)
 
         self.status_vars = {
             "status": tk.StringVar(value="stopped"),
@@ -382,9 +440,41 @@ class DownloaderApp(ttk.Frame):
             ttk.Label(grid, text=label).grid(row=row, column=0, sticky="w", padx=(0, 16), pady=4)
             ttk.Label(grid, textvariable=self.status_vars[key]).grid(row=row, column=1, sticky="w", pady=4)
 
+        self.progress_bar_var = tk.DoubleVar(value=0.0)
+        self.progress_bar_label_var = tk.StringVar(value="等待任务")
+        progress_row = ttk.Frame(page)
+        progress_row.pack(fill="x", pady=(12, 0))
+        ttk.Progressbar(
+            progress_row,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100.0,
+            variable=self.progress_bar_var,
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            progress_row,
+            textvariable=self.progress_bar_label_var,
+            width=12,
+            anchor="e",
+        ).pack(side="left", padx=(12, 0))
+
         ttk.Label(page, text="每群扫描状态").pack(anchor="w", pady=(18, 6))
         self.group_status = tk.Text(page, height=10, wrap="word", state="disabled")
         self.group_status.pack(fill="both", expand=True)
+
+    def _choose_download_root(self) -> None:
+        selected = filedialog.askdirectory(initialdir=self.download_root_var.get())
+        if selected:
+            self._save_download_root(selected)
+
+    def _save_download_root(self, value: str | None = None) -> None:
+        def save() -> None:
+            root = self.controller.save_download_root(
+                value if value is not None else self.download_root_var.get()
+            )
+            self.download_root_var.set(str(root))
+
+        self._call_sync(save)
 
     def _load_saved_credentials(self) -> Credentials | None:
         credentials = self.controller.load_credentials()
@@ -930,6 +1020,9 @@ class DownloaderApp(ttk.Frame):
             )
             self.status_vars["download_progress"].set(progress_text)
             self.status_vars["download_speed"].set(speed_text)
+            bar_value, bar_label = progress_bar_presentation(snapshot)
+            self.progress_bar_var.set(bar_value)
+            self.progress_bar_label_var.set(bar_label)
             for key in (
                 "pending_live",
                 "pending_history",
@@ -965,6 +1058,7 @@ class DownloaderApp(ttk.Frame):
         except Exception as error:
             message = self._safe_error(error)
             self.status_vars["status"].set(f"状态读取失败：{message}")
+            self.progress_bar_label_var.set("状态读取失败")
             self._publish_status({"status": "error", "error": message})
         self._status_after = self.after(2000, self._refresh_status)
 

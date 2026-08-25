@@ -129,6 +129,54 @@ def test_controller_preserves_selected_history_policy(tmp_path: Path) -> None:
     assert controller.selected_chat_ids() == {-1001, -1002}
 
 
+def test_save_download_root_preserves_groups(tmp_path: Path) -> None:
+    controller, _, _, _ = make_controller(tmp_path / "project")
+    groups = (GroupTarget(-1001, "群", False),)
+    controller.save_selected_groups(groups)
+
+    selected = controller.save_download_root(tmp_path / "external")
+    config = controller.config_store.load_config()
+
+    assert selected == (tmp_path / "external").resolve()
+    assert config.groups == groups
+    assert config.download_root == selected
+
+
+def test_save_groups_preserves_download_root(tmp_path: Path) -> None:
+    controller, _, _, _ = make_controller(tmp_path / "project")
+    selected = controller.save_download_root(tmp_path / "external")
+    groups = (GroupTarget(-1001, "群", True),)
+
+    controller.save_selected_groups(groups)
+
+    config = controller.config_store.load_config()
+    assert config.groups == groups
+    assert config.download_root == selected
+
+
+def test_open_downloads_uses_configured_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _, _ = make_controller(tmp_path / "project")
+    selected = controller.save_download_root(tmp_path / "external")
+    opened: list[Path] = []
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.controller.os.startfile",
+        lambda path: opened.append(Path(path)),
+    )
+
+    controller.open_downloads()
+
+    assert opened == [selected]
+
+
+def test_current_download_root_defaults_to_project_downloads(tmp_path: Path) -> None:
+    controller, paths, _, _ = make_controller(tmp_path)
+
+    assert controller.current_download_root() == paths.downloads
+
+
 @pytest.mark.asyncio
 async def test_login_flow_and_group_listing(tmp_path: Path) -> None:
     controller, _, gateway, _ = make_controller(tmp_path)

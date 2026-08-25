@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,13 +32,13 @@ class FakeButton:
 
 
 class FakeVar:
-    def __init__(self, value: str = "") -> None:
+    def __init__(self, value: str | float = "") -> None:
         self.value = value
 
-    def get(self) -> str:
+    def get(self) -> str | float:
         return self.value
 
-    def set(self, value: str) -> None:
+    def set(self, value: str | float) -> None:
         self.value = value
 
 
@@ -199,6 +200,76 @@ def test_format_progress_tolerates_missing_or_malformed_data(progress) -> None:
     assert app_module.format_download_progress(progress) == ("-", "-")
 
 
+@pytest.mark.parametrize(
+    ("snapshot", "value", "label"),
+    [
+        ({"status": "running", "progress": {"percent": 0}}, 0.0, "0.0%"),
+        (
+            {"status": "running", "progress": {"percent": 52.34}},
+            52.34,
+            "52.3%",
+        ),
+        (
+            {"status": "running", "progress": {"percent": 120}},
+            100.0,
+            "100.0%",
+        ),
+        (
+            {"status": "running", "current_file": "x.mp4", "progress": {}},
+            0.0,
+            "正在准备",
+        ),
+        ({"status": "running"}, 0.0, "等待任务"),
+        ({"status": "stopped"}, 0.0, "后台已停止"),
+        (
+            {"status": "stale", "progress": {"percent": 50}},
+            50.0,
+            "心跳异常",
+        ),
+    ],
+)
+def test_progress_bar_presentation(snapshot, value, label) -> None:
+    assert app_module.progress_bar_presentation(snapshot) == (value, label)
+
+
+@pytest.mark.parametrize("percent", [True, "50", -1, float("nan"), float("inf")])
+def test_progress_bar_rejects_malformed_percent(percent) -> None:
+    value, label = app_module.progress_bar_presentation(
+        {
+            "status": "running",
+            "current_file": "x.mp4",
+            "progress": {"percent": percent},
+        }
+    )
+
+    assert value == 0.0
+    assert label == "正在准备"
+
+
+def test_choose_download_root_saves_and_displays_normalized_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = (tmp_path / "external").resolve()
+    saved: list[Path] = []
+    app = object.__new__(DownloaderApp)
+    app.download_root_var = FakeVar(str(tmp_path))
+    app._call_sync = lambda function: function()
+    app.controller = SimpleNamespace(
+        current_download_root=lambda: tmp_path,
+        save_download_root=lambda value: saved.append(Path(value)) or selected,
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.app.filedialog.askdirectory",
+        lambda **_kwargs: str(selected),
+    )
+
+    app._choose_download_root()
+
+    assert saved == [selected]
+    assert app.download_root_var.get() == str(selected)
+
+
 def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False
@@ -245,6 +316,8 @@ def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None
             "last_error",
         )
     }
+    app.progress_bar_var = FakeVar()
+    app.progress_bar_label_var = FakeVar()
     app.group_status = FakeText()
     app.after = lambda *_args: "after-status"
 
@@ -254,6 +327,8 @@ def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None
         "5.00 MiB / 10.00 MiB（50.0%）"
     )
     assert app.status_vars["download_speed"].get() == "2.00 MiB/s"
+    assert app.progress_bar_var.get() == 50.0
+    assert app.progress_bar_label_var.get() == "50.0%"
     assert app.status_vars["paused_history"].get() == "3"
     assert app.group_status.value == "频道：监听新内容；历史下载已暂停"
     assert published[0]["status"] == "running"
@@ -266,6 +341,8 @@ def test_status_read_error_is_published_for_tray_recovery() -> None:
         read_status=lambda: (_ for _ in ()).throw(RuntimeError("heartbeat broken"))
     )
     app.status_vars = {"status": FakeVar()}
+    app.progress_bar_var = FakeVar(37.5)
+    app.progress_bar_label_var = FakeVar("37.5%")
     app.api_hash_var = FakeVar("")
     app.phone_var = FakeVar("")
     app.code_var = FakeVar("")
@@ -277,6 +354,8 @@ def test_status_read_error_is_published_for_tray_recovery() -> None:
 
     app._refresh_status()
 
+    assert app.progress_bar_var.get() == 37.5
+    assert app.progress_bar_label_var.get() == "状态读取失败"
     assert published == [{"status": "error", "error": "heartbeat broken"}]
 
 
@@ -310,6 +389,8 @@ def test_status_listener_failure_does_not_corrupt_running_page() -> None:
             "last_error",
         )
     }
+    app.progress_bar_var = FakeVar()
+    app.progress_bar_label_var = FakeVar()
     app.group_status = FakeText()
 
     def fail(_snapshot: dict[str, object]) -> None:

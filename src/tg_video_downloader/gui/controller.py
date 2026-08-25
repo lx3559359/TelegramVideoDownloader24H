@@ -5,6 +5,7 @@ import os
 import threading
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
@@ -19,6 +20,10 @@ from tg_video_downloader.gateway import (
 from tg_video_downloader.models import AppConfig, Credentials, GroupTarget
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.storage import (
+    effective_download_root,
+    require_writable_download_root,
+)
 from tg_video_downloader.windows import (
     clear_stop,
     request_stop,
@@ -276,12 +281,24 @@ class GuiController:
             current = self.config_store.load_config()
         except FileNotFoundError:
             current = AppConfig()
-        updated = AppConfig(
-            groups=groups,
-            config_poll_seconds=current.config_poll_seconds,
-            prevent_sleep=current.prevent_sleep,
-        ).require_targets()
+        updated = replace(current, groups=groups).require_targets()
         self.config_store.save_config(updated)
+
+    def current_download_root(self) -> Path:
+        try:
+            config = self.config_store.load_config()
+        except FileNotFoundError:
+            config = AppConfig()
+        return effective_download_root(self.paths, config)
+
+    def save_download_root(self, value: str | Path) -> Path:
+        root = require_writable_download_root(self.paths, value)
+        try:
+            current = self.config_store.load_config()
+        except FileNotFoundError:
+            current = AppConfig()
+        self.config_store.save_config(replace(current, download_root=root))
+        return root
 
     def start(self) -> object:
         credentials = self.load_credentials()
@@ -327,8 +344,9 @@ class GuiController:
         return snapshot
 
     def open_downloads(self) -> None:
-        self.paths.downloads.mkdir(parents=True, exist_ok=True)
-        os.startfile(self.paths.downloads)
+        download_root = self.current_download_root()
+        download_root.mkdir(parents=True, exist_ok=True)
+        os.startfile(download_root)
 
     def open_logs(self) -> None:
         self.paths.logs.mkdir(parents=True, exist_ok=True)
