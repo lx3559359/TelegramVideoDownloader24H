@@ -21,3 +21,30 @@ def test_build_path_is_unique_and_inside_downloads(tmp_path: Path) -> None:
 
     assert result == paths.downloads / "测试群_-1001" / "2026-08" / "42_same_name.mp4"
     assert result.resolve().is_relative_to(paths.downloads.resolve())
+
+
+def test_build_path_uses_explicit_download_root(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path / "project")
+    selected = (tmp_path / "external").resolve()
+    message = MessageInfo(
+        -1001,
+        42,
+        datetime(2026, 8, 24, 1, tzinfo=UTC),
+        "video/mp4",
+        "same:name.mp4",
+        ".mp4",
+        100,
+        True,
+        False,
+        False,
+    )
+
+    result = build_final_path(
+        paths,
+        "测试群",
+        message,
+        download_root=selected,
+    )
+
+    assert result == selected / "测试群_-1001" / "2026-08" / "42_same_name.mp4"
+    assert result.resolve().is_relative_to(selected)
