@@ -222,7 +222,7 @@ class Doctor:
         return config, DiagnosticCheck(
             "config",
             "pass",
-            f"配置有效，已选择 {len(config.groups)} 个群",
+            f"配置有效，已选择 {len(config.groups)} 个群组/频道",
         )
 
     def _load_credentials(
@@ -315,12 +315,12 @@ class Doctor:
                 return DiagnosticCheck(
                     "telegram",
                     "fail",
-                    f"有 {len(missing)} 个白名单群当前不可见",
+                    f"有 {len(missing)} 个白名单目标当前不可见",
                 )
             return DiagnosticCheck(
                 "telegram",
                 "pass",
-                f"Telegram 在线检查通过，{len(config.groups)} 个白名单群可见",
+                f"Telegram 在线检查通过，{len(config.groups)} 个白名单目标可见",
             )
         except AuthenticationRequiredError as error:
             return DiagnosticCheck("telegram", "fail", self._format_error(error))

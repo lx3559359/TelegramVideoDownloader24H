@@ -223,6 +223,6 @@ async def test_invisible_whitelisted_group_fails_online_check(tmp_path: Path) ->
     telegram = next(item for item in report.checks if item.key == "telegram")
 
     assert telegram.status == "fail"
-    assert "1 个白名单群" in telegram.message
+    assert "1 个白名单目标" in telegram.message
     assert group.title not in telegram.message
     assert str(group.chat_id) not in telegram.message

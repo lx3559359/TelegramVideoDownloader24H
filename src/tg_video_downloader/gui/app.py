@@ -46,7 +46,9 @@ class DownloaderApp(ttk.Frame):
         self._build_account_page()
         self._build_groups_page()
         self._build_run_page()
-        self._load_saved_credentials()
+        saved_credentials = self._load_saved_credentials()
+        if saved_credentials is not None:
+            self._check_saved_session()
         self._refresh_status()
 
     def _build_account_page(self) -> None:
@@ -211,7 +213,7 @@ class DownloaderApp(ttk.Frame):
 
     def _build_groups_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=12)
-        self.notebook.add(page, text="群组")
+        self.notebook.add(page, text="群组/频道")
         page.rowconfigure(1, weight=1)
         page.columnconfigure(0, weight=1)
 
@@ -224,7 +226,7 @@ class DownloaderApp(ttk.Frame):
         ttk.Entry(toolbar, textvariable=self.search_var).grid(row=0, column=1, sticky="ew")
         self.refresh_groups_button = ttk.Button(
             toolbar,
-            text="刷新群列表",
+            text="刷新群组/频道",
             command=self._load_groups,
         )
         self.refresh_groups_button.grid(row=0, column=2, padx=(8, 0))
@@ -236,8 +238,8 @@ class DownloaderApp(ttk.Frame):
             selectmode="browse",
         )
         self.group_tree.heading("selected", text="选择")
-        self.group_tree.heading("title", text="群名")
-        self.group_tree.heading("chat_id", text="群 ID")
+        self.group_tree.heading("title", text="名称")
+        self.group_tree.heading("chat_id", text="会话 ID")
         self.group_tree.column("selected", width=60, anchor="center", stretch=False)
         self.group_tree.column("title", width=420)
         self.group_tree.column("chat_id", width=180, anchor="e")
@@ -309,13 +311,47 @@ class DownloaderApp(ttk.Frame):
         self.group_status = tk.Text(page, height=10, wrap="word", state="disabled")
         self.group_status.pack(fill="both", expand=True)
 
-    def _load_saved_credentials(self) -> None:
+    def _load_saved_credentials(self) -> Credentials | None:
         credentials = self.controller.load_credentials()
         if credentials is None:
-            return
+            return None
         self.api_id_var.set(str(credentials.api_id))
         self.api_hash_var.set(credentials.api_hash)
         self.phone_var.set(credentials.phone)
+        return credentials
+
+    def _check_saved_session(self) -> None:
+        generation = self._qr_generation
+        self.account_status_var.set("正在恢复已有登录会话")
+        self.qr_login_button.state(["disabled"])
+        self._run_qr_operation(
+            self.controller.saved_session_authorized(),
+            generation,
+            lambda authorized: self._handle_saved_session_status(
+                authorized,
+                generation,
+            ),
+            lambda error: self._handle_saved_session_error(error, generation),
+        )
+
+    def _handle_saved_session_status(
+        self,
+        authorized: bool,
+        generation: int,
+    ) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self._finish_qr_login("登录成功" if authorized else "尚未登录")
+
+    def _handle_saved_session_error(
+        self,
+        _error: Exception,
+        generation: int,
+    ) -> None:
+        if not self._is_current_qr_generation(generation):
+            return
+        self._finish_qr_login("尚未登录")
+        self.account_status_var.set("暂时无法检查已有会话，可稍后重试")
 
     def _credentials_from_form(self) -> Credentials:
         return Credentials(
@@ -702,7 +738,7 @@ class DownloaderApp(ttk.Frame):
         return "break"
 
     def _update_selection_count(self) -> None:
-        self.selection_count_var.set(f"已选择 {len(self._selected_ids)} 个群")
+        self.selection_count_var.set(f"已选择 {len(self._selected_ids)} 个群组/频道")
 
     def _save_groups(self) -> None:
         groups = tuple(group for group in self._groups if group.chat_id in self._selected_ids)
@@ -711,7 +747,7 @@ class DownloaderApp(ttk.Frame):
         except Exception as error:
             self._show_error(error)
             return
-        messagebox.showinfo("已保存", f"已保存 {len(groups)} 个群")
+        messagebox.showinfo("已保存", f"已保存 {len(groups)} 个群组/频道")
 
     def _start_service(self) -> None:
         self._call_sync(self.controller.start)
@@ -792,7 +828,7 @@ class DownloaderApp(ttk.Frame):
                     lines.append(f"{group.get('title', group.get('chat_id'))}：{state}")
             self.group_status.configure(state="normal")
             self.group_status.delete("1.0", "end")
-            self.group_status.insert("1.0", "\n".join(lines) or "暂无群组状态")
+            self.group_status.insert("1.0", "\n".join(lines) or "暂无群组/频道状态")
             self.group_status.configure(state="disabled")
         except Exception as error:
             self.status_vars["status"].set(f"状态读取失败：{self._safe_error(error)}")

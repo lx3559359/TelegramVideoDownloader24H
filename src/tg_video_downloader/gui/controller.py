@@ -120,6 +120,17 @@ class GuiController:
     def login_active(self) -> bool:
         return self._login_gateway is not None
 
+    async def saved_session_authorized(self) -> bool:
+        credentials = self.load_credentials()
+        if credentials is None:
+            return False
+        gateway = self.gateway_factory(self.paths, credentials)
+        try:
+            await gateway.connect()
+            return await gateway.is_authorized()
+        finally:
+            await gateway.disconnect()
+
     async def start_qr_login(
         self,
         credentials: Credentials,

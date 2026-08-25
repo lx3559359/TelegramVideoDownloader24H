@@ -33,9 +33,9 @@ class AppConfig:
 
     def require_targets(self) -> "AppConfig":
         if not self.groups:
-            raise ValueError("至少选择一个群后才能启动下载器")
+            raise ValueError("至少选择一个群组或频道后才能启动下载器")
         if len({group.chat_id for group in self.groups}) != len(self.groups):
-            raise ValueError("群组白名单包含重复群 ID")
+            raise ValueError("目标白名单包含重复会话 ID")
         return self
 
 

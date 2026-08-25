@@ -155,6 +155,19 @@ async def test_qr_login_reuses_authorized_session(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_saved_session_probe_reuses_authorization_without_starting_login(
+    tmp_path: Path,
+) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    controller.save_credentials(Credentials(12345, "hash"))
+    gateway.authorized = True
+
+    assert await controller.saved_session_authorized() is True
+    assert gateway.connected is False
+    assert controller.login_active is False
+
+
+@pytest.mark.asyncio
 async def test_qr_login_refresh_password_and_cleanup(tmp_path: Path) -> None:
     controller, _, gateway, _ = make_controller(tmp_path)
     gateway.authorized = False

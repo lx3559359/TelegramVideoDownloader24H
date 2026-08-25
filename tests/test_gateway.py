@@ -77,11 +77,14 @@ def test_normalize_animated_and_round_attributes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_groups_excludes_private_chats_and_sorts(tmp_path: Path) -> None:
+async def test_list_groups_and_channels_excludes_private_chats_and_sorts(
+    tmp_path: Path,
+) -> None:
     dialogs = (
-        SimpleNamespace(id=-1002, name="beta", is_group=True),
-        SimpleNamespace(id=7, name="Private", is_group=False),
-        SimpleNamespace(id=-1001, name="Alpha", is_group=True),
+        SimpleNamespace(id=-1002, name="beta", is_group=True, is_channel=True),
+        SimpleNamespace(id=7, name="Private", is_group=False, is_channel=False),
+        SimpleNamespace(id=-1003, name="News", is_group=False, is_channel=True),
+        SimpleNamespace(id=-1001, name="Alpha", is_group=True, is_channel=False),
     )
 
     class FakeClient:
@@ -110,6 +113,7 @@ async def test_list_groups_excludes_private_chats_and_sorts(tmp_path: Path) -> N
     assert await gateway.list_groups() == (
         GroupTarget(-1001, "Alpha"),
         GroupTarget(-1002, "beta"),
+        GroupTarget(-1003, "News"),
     )
     assert captured["session"] == str(paths.session)
     assert captured["options"] == {

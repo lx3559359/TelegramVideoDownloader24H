@@ -282,7 +282,7 @@ class TelethonGateway:
         groups: list[GroupTarget] = []
         try:
             async for dialog in self._client.iter_dialogs():
-                if dialog.is_group is True:
+                if dialog.is_group is True or dialog.is_channel is True:
                     groups.append(GroupTarget(int(dialog.id), str(dialog.name)))
         except Exception as error:
             raise _mapped_error(error) from error
@@ -393,7 +393,7 @@ def _mapped_error(error: Exception) -> Exception:
             errors.ChatWriteForbiddenError,
         ),
     ):
-        return GroupAccessError("无法访问该群组")
+        return GroupAccessError("无法访问该群组或频道")
     if isinstance(error, errors.MessageIdInvalidError):
         return PermanentMessageError("消息不存在、已删除或不可下载")
     if isinstance(

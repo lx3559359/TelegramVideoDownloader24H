@@ -77,6 +77,44 @@ def test_stale_qr_generation_is_ignored() -> None:
     assert app._is_current_qr_generation(3) is False
 
 
+def test_saved_session_status_restores_authorized_account_without_qr() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app._qr_generation = 4
+    finished: list[str] = []
+    app._finish_qr_login = finished.append
+
+    app._handle_saved_session_status(True, 4)
+
+    assert finished == ["登录成功"]
+
+
+def test_saved_session_status_leaves_manual_login_available_when_unauthorized() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app._qr_generation = 4
+    finished: list[str] = []
+    app._finish_qr_login = finished.append
+
+    app._handle_saved_session_status(False, 4)
+
+    assert finished == ["尚未登录"]
+
+
+def test_saved_session_probe_error_keeps_session_and_shows_generic_status() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app._qr_generation = 4
+    app.account_status_var = FakeVar()
+    finished: list[str] = []
+    app._finish_qr_login = finished.append
+
+    app._handle_saved_session_error(RuntimeError("private network detail"), 4)
+
+    assert finished == ["尚未登录"]
+    assert app.account_status_var.get() == "暂时无法检查已有会话，可稍后重试"
+
+
 def test_expired_qr_refreshes_current_generation() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False

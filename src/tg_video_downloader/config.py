@@ -49,7 +49,7 @@ class ConfigStore:
 
         groups_data = data.get("groups", [])
         if not isinstance(groups_data, list):
-            raise ValueError("groups 必须是群组列表")
+            raise ValueError("groups 必须是群组/频道列表")
         groups = tuple(
             GroupTarget(chat_id=int(group["chat_id"]), title=str(group["title"]))
             for group in groups_data
