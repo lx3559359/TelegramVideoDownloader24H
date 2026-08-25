@@ -13,12 +13,12 @@ def test_hidden_supervisor_does_not_use_detached_process(
 ) -> None:
     paths = ProjectPaths.from_root(tmp_path)
     paths.ensure_directories()
-    (paths.runtime / "supervisor.pid").write_text("1", encoding="ascii")
     captured: dict[str, object] = {}
     process = SimpleNamespace(poll=lambda: None)
 
     def fake_popen(*_args, **kwargs):
         captured.update(kwargs)
+        (paths.runtime / "supervisor.pid").write_text("1", encoding="ascii")
         return process
 
     monkeypatch.setattr(windows.subprocess, "Popen", fake_popen)
@@ -47,6 +47,20 @@ def test_stale_heartbeat_does_not_hide_early_exit(
     paths = ProjectPaths.from_root(tmp_path)
     paths.ensure_directories()
     paths.heartbeat.write_text('{"status":"stopped"}', encoding="utf-8")
+    process = SimpleNamespace(poll=lambda: 0)
+    monkeypatch.setattr(windows.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(RuntimeError, match="退出码 0"):
+        windows.start_hidden_supervisor(tmp_path)
+
+
+def test_stale_supervisor_pid_does_not_hide_early_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    (paths.runtime / "supervisor.pid").write_text("999999", encoding="ascii")
     process = SimpleNamespace(poll=lambda: 0)
     monkeypatch.setattr(windows.subprocess, "Popen", lambda *_args, **_kwargs: process)
 

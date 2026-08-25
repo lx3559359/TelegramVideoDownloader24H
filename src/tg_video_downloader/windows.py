@@ -109,6 +109,7 @@ def start_hidden_supervisor(project_root: Path) -> subprocess.Popen[bytes]:
         paths.heartbeat,
     )
     initial_states = {path: _file_state(path) for path in ready_files}
+    supervisor_was_active = _file_is_locked(supervisor_pid)
     process = subprocess.Popen(
         [
             "powershell.exe",
@@ -121,7 +122,7 @@ def start_hidden_supervisor(project_root: Path) -> subprocess.Popen[bytes]:
         cwd=root,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
-    if initial_states[supervisor_pid] is not None:
+    if supervisor_was_active:
         return process
 
     deadline = time.monotonic() + SUPERVISOR_START_OBSERVE_SECONDS
@@ -145,3 +146,14 @@ def _file_state(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return stat.st_mtime_ns, stat.st_size
+
+
+def _file_is_locked(path: Path) -> bool:
+    try:
+        with path.open("rb"):
+            pass
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
