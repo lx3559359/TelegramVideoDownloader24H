@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import mimetypes
+import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,6 +48,11 @@ class QrLoginChallenge:
 
 
 MessageHandler = Callable[[MessageInfo], Awaitable[None]]
+DownloadProgressCallback = Callable[[int, int | None], None]
+
+DOWNLOAD_CHUNK_SIZE = 512 * 1024
+SYNC_BYTES = 8 * 1024 * 1024
+SYNC_SECONDS = 5.0
 
 
 class TelegramGateway(Protocol):
@@ -97,6 +104,9 @@ class TelegramGateway(Protocol):
         chat_id: int,
         message_id: int,
         destination: Path,
+        *,
+        offset: int = 0,
+        progress_callback: DownloadProgressCallback | None = None,
     ) -> Path: ...
 
 
@@ -283,7 +293,13 @@ class TelethonGateway:
         try:
             async for dialog in self._client.iter_dialogs():
                 if dialog.is_group is True or dialog.is_channel is True:
-                    groups.append(GroupTarget(int(dialog.id), str(dialog.name)))
+                    groups.append(
+                        GroupTarget(
+                            int(dialog.id),
+                            str(dialog.name),
+                            download_history=False,
+                        )
+                    )
         except Exception as error:
             raise _mapped_error(error) from error
         return tuple(sorted(groups, key=lambda group: group.title.casefold()))
@@ -340,18 +356,52 @@ class TelethonGateway:
         chat_id: int,
         message_id: int,
         destination: Path,
+        *,
+        offset: int = 0,
+        progress_callback: DownloadProgressCallback | None = None,
     ) -> Path:
         try:
             message = await self._client.get_messages(chat_id, ids=message_id)
             if message is None:
                 raise PermanentMessageError("消息不存在或已被删除")
-            actual_path = await self._client.download_media(
-                message,
-                file=str(destination),
-            )
-            if not actual_path:
+            media = getattr(message, "media", None)
+            if media is None:
                 raise PermanentMessageError("消息没有可下载的媒体")
-            return Path(actual_path)
+
+            total = getattr(getattr(message, "document", None), "size", None)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            mode = "ab" if offset else "wb"
+            downloaded = offset
+            unsynced = 0
+            last_sync = time.monotonic()
+            stream = self._client.iter_download(
+                media,
+                offset=offset,
+                request_size=DOWNLOAD_CHUNK_SIZE,
+                chunk_size=DOWNLOAD_CHUNK_SIZE,
+            )
+            try:
+                with destination.open(mode, buffering=0) as handle:
+                    async for chunk in stream:
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+                        unsynced += len(chunk)
+                        if progress_callback is not None:
+                            progress_callback(downloaded, total)
+                        now = time.monotonic()
+                        if (
+                            unsynced >= SYNC_BYTES
+                            or now - last_sync >= SYNC_SECONDS
+                        ):
+                            os.fsync(handle.fileno())
+                            unsynced = 0
+                            last_sync = now
+                    os.fsync(handle.fileno())
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    await close()
+            return destination
         except (
             AuthenticationRequiredError,
             GroupAccessError,

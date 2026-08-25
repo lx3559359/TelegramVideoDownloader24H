@@ -11,6 +11,7 @@ class FakeTelegramGateway:
         self.download_payloads: dict[tuple[int, int], bytes] = {}
         self.download_failures: dict[tuple[int, int], list[Exception]] = {}
         self.downloaded_keys: list[tuple[int, int]] = []
+        self.download_offsets: list[int] = []
         self.iterated_chat_ids: list[int] = []
         self.handler = None
         self.authorized = True
@@ -53,7 +54,7 @@ class FakeTelegramGateway:
 
     async def list_groups(self) -> tuple[GroupTarget, ...]:
         return tuple(
-            GroupTarget(chat_id, f"群 {chat_id}")
+            GroupTarget(chat_id, f"群 {chat_id}", download_history=False)
             for chat_id in sorted(self.messages)
         )
 
@@ -91,11 +92,19 @@ class FakeTelegramGateway:
         chat_id: int,
         message_id: int,
         destination: Path,
+        *,
+        offset: int = 0,
+        progress_callback=None,
     ) -> Path:
         self.downloaded_keys.append((chat_id, message_id))
+        self.download_offsets.append(offset)
         failures = self.download_failures.get((chat_id, message_id), [])
         if failures:
             raise failures.pop(0)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(self.download_payloads[(chat_id, message_id)])
+        payload = self.download_payloads[(chat_id, message_id)]
+        with destination.open("ab" if offset else "wb") as handle:
+            handle.write(payload[offset:])
+        if progress_callback is not None:
+            progress_callback(len(payload), len(payload))
         return destination

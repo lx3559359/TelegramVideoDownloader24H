@@ -111,9 +111,9 @@ async def test_list_groups_and_channels_excludes_private_chats_and_sorts(
     )
 
     assert await gateway.list_groups() == (
-        GroupTarget(-1001, "Alpha"),
-        GroupTarget(-1002, "beta"),
-        GroupTarget(-1003, "News"),
+        GroupTarget(-1001, "Alpha", False),
+        GroupTarget(-1002, "beta", False),
+        GroupTarget(-1003, "News", False),
     )
     assert captured["session"] == str(paths.session)
     assert captured["options"] == {
@@ -122,6 +122,83 @@ async def test_list_groups_and_channels_excludes_private_chats_and_sorts(
         "retry_delay": 5,
         "flood_sleep_threshold": 60,
     }
+
+
+class DownloadStream:
+    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+        self._chunks = iter(chunks)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return next(self._chunks)
+        except StopIteration as error:
+            raise StopAsyncIteration from error
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class DownloadClient:
+    def __init__(self, chunks: tuple[bytes, ...], media_size: int) -> None:
+        self.chunks = chunks
+        self.media_size = media_size
+        self.download_offsets: list[int] = []
+        self.download_options: list[dict[str, int]] = []
+        self.stream: DownloadStream | None = None
+
+    async def get_messages(self, chat_id: int, *, ids: int):
+        return SimpleNamespace(
+            media=object(),
+            document=SimpleNamespace(size=self.media_size),
+        )
+
+    def iter_download(self, _media, **options):
+        self.download_offsets.append(options["offset"])
+        self.download_options.append(options)
+        self.stream = DownloadStream(self.chunks)
+        return self.stream
+
+
+@pytest.mark.asyncio
+async def test_download_appends_from_offset_and_reports_progress(
+    tmp_path: Path,
+) -> None:
+    client = DownloadClient(chunks=(b"def", b"ghi"), media_size=9)
+    gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path),
+        Credentials(123, "hash"),
+        client_factory=lambda *_args, **_kwargs: client,
+    )
+    destination = tmp_path / ".tmp" / "job.part"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(b"abc")
+    progress: list[tuple[int, int | None]] = []
+
+    result = await gateway.download_message(
+        -1001,
+        1,
+        destination,
+        offset=3,
+        progress_callback=lambda current, total: progress.append((current, total)),
+    )
+
+    assert result == destination
+    assert destination.read_bytes() == b"abcdefghi"
+    assert client.download_offsets == [3]
+    assert client.download_options == [
+        {
+            "offset": 3,
+            "request_size": 512 * 1024,
+            "chunk_size": 512 * 1024,
+        }
+    ]
+    assert progress == [(6, 9), (9, 9)]
+    assert client.stream is not None
+    assert client.stream.closed is True
 
 
 @pytest.mark.asyncio
