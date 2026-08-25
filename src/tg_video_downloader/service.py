@@ -5,6 +5,7 @@ import logging
 import os
 from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -198,6 +199,7 @@ class DownloaderService:
                 "chat_id": group.chat_id,
                 "title": group.title,
                 "enabled": group.enabled,
+                "download_history": group.download_history,
                 "history_complete": group.history_complete,
                 "access_error": group.access_error,
             }
@@ -206,6 +208,9 @@ class DownloaderService:
         current_file = getattr(worker, "current_file", None)
         if current_file:
             snapshot["current_file"] = str(current_file)
+        progress = getattr(worker, "progress", None)
+        if progress is not None:
+            snapshot["progress"] = asdict(progress)
         if self._config_error:
             snapshot["config_error"] = self._config_error
         if error:

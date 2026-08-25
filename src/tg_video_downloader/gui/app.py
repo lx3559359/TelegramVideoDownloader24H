@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from concurrent.futures import CancelledError, Future
 from datetime import datetime
+from math import isfinite
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
@@ -23,6 +24,64 @@ from tg_video_downloader.gui.qr_view import (
 )
 from tg_video_downloader.models import Credentials, GroupTarget
 from tg_video_downloader.paths import ProjectPaths
+
+
+def _format_bytes(value: int | float) -> str:
+    size = float(max(0, value))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    raise AssertionError("unreachable")
+
+
+def format_download_progress(progress: object) -> tuple[str, str]:
+    if not isinstance(progress, dict):
+        return "-", "-"
+    downloaded = progress.get("downloaded_bytes")
+    total = progress.get("total_bytes")
+    percent = progress.get("percent")
+    speed = progress.get("bytes_per_second")
+    resumed = progress.get("resumed")
+    if (
+        isinstance(downloaded, bool)
+        or not isinstance(downloaded, int)
+        or downloaded < 0
+        or (
+            total is not None
+            and (
+                isinstance(total, bool)
+                or not isinstance(total, int)
+                or total < 0
+            )
+        )
+        or (
+            percent is not None
+            and (
+                isinstance(percent, bool)
+                or not isinstance(percent, (int, float))
+                or not isfinite(percent)
+            )
+        )
+        or isinstance(speed, bool)
+        or not isinstance(speed, (int, float))
+        or not isfinite(speed)
+        or speed < 0
+        or not isinstance(resumed, bool)
+    ):
+        return "-", "-"
+
+    details: list[str] = []
+    if percent is not None:
+        details.append(f"{percent:.1f}%")
+    if resumed:
+        details.append("断点续传")
+    suffix = f"（{'，'.join(details)}）" if details else ""
+    total_text = _format_bytes(total) if total is not None else "未知"
+    return (
+        f"{_format_bytes(downloaded)} / {total_text}{suffix}",
+        f"{_format_bytes(speed)}/s",
+    )
 
 
 class DownloaderApp(ttk.Frame):
@@ -290,8 +349,11 @@ class DownloaderApp(ttk.Frame):
             "status": tk.StringVar(value="stopped"),
             "updated_at": tk.StringVar(value="-"),
             "current_file": tk.StringVar(value="-"),
+            "download_progress": tk.StringVar(value="-"),
+            "download_speed": tk.StringVar(value="-"),
             "pending_live": tk.StringVar(value="0"),
             "pending_history": tk.StringVar(value="0"),
+            "paused_history": tk.StringVar(value="0"),
             "completed": tk.StringVar(value="0"),
             "retry_wait": tk.StringVar(value="0"),
             "permanent_error": tk.StringVar(value="0"),
@@ -301,8 +363,11 @@ class DownloaderApp(ttk.Frame):
             ("运行状态", "status"),
             ("最后心跳", "updated_at"),
             ("当前文件", "current_file"),
+            ("下载进度", "download_progress"),
+            ("下载速度", "download_speed"),
             ("实时/补抓等待", "pending_live"),
             ("历史等待", "pending_history"),
+            ("历史已暂停", "paused_history"),
             ("已完成", "completed"),
             ("等待重试", "retry_wait"),
             ("永久失败", "permanent_error"),
@@ -844,9 +909,15 @@ class DownloaderApp(ttk.Frame):
             self.status_vars["status"].set(str(snapshot.get("status", "stopped")))
             self.status_vars["updated_at"].set(str(snapshot.get("updated_at", "-")))
             self.status_vars["current_file"].set(str(snapshot.get("current_file", "-")))
+            progress_text, speed_text = format_download_progress(
+                snapshot.get("progress")
+            )
+            self.status_vars["download_progress"].set(progress_text)
+            self.status_vars["download_speed"].set(speed_text)
             for key in (
                 "pending_live",
                 "pending_history",
+                "paused_history",
                 "completed",
                 "retry_wait",
                 "permanent_error",
@@ -861,9 +932,14 @@ class DownloaderApp(ttk.Frame):
                 for group in groups:
                     if not isinstance(group, dict):
                         continue
-                    state = "历史完成" if group.get("history_complete") else "历史扫描中"
                     if group.get("access_error"):
                         state = f"访问错误：{group['access_error']}"
+                    elif not group.get("download_history", True):
+                        state = "监听新内容；历史下载已暂停"
+                    elif group.get("history_complete"):
+                        state = "历史扫描完成"
+                    else:
+                        state = "监听新内容；历史下载开启"
                     lines.append(f"{group.get('title', group.get('chat_id'))}：{state}")
             self.group_status.configure(state="normal")
             self.group_status.delete("1.0", "end")

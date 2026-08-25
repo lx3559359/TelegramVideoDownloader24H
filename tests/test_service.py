@@ -12,6 +12,7 @@ from tg_video_downloader.paths import ProjectPaths
 from tg_video_downloader.service import DownloaderService
 from tg_video_downloader.state import StateStore
 from tg_video_downloader.windows import request_stop
+from tg_video_downloader.worker import DownloadProgress
 from tests.fakes import FakeTelegramGateway
 
 
@@ -151,6 +152,34 @@ def test_running_snapshot_includes_current_file(tmp_path: Path) -> None:
     try:
         snapshot = service._snapshot("running", state, worker=worker)
         assert snapshot["current_file"] == "7_video.mp4"
+    finally:
+        state.close()
+
+
+def test_snapshot_includes_download_progress_and_history_policy(
+    tmp_path: Path,
+) -> None:
+    paths, _ = configure(tmp_path, (GroupTarget(-1001, "群", False),))
+    state = StateStore(paths.database)
+    state.reconcile_targets((GroupTarget(-1001, "群", False),))
+    service = DownloaderService(paths, lambda *_: FakeTelegramGateway())
+    worker = SimpleNamespace(
+        current_file="video.mp4",
+        progress=DownloadProgress(
+            "video.mp4",
+            5 * 1024**2,
+            10 * 1024**2,
+            50.0,
+            2 * 1024**2,
+            True,
+        ),
+    )
+    try:
+        snapshot = service._snapshot("running", state, worker=worker)
+
+        assert snapshot["progress"]["downloaded_bytes"] == 5 * 1024**2
+        assert snapshot["progress"]["percent"] == 50.0
+        assert snapshot["groups"][0]["download_history"] is False
     finally:
         state.close()
 

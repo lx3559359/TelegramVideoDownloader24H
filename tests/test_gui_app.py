@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from tg_video_downloader.gateway import QrLoginExpiredError, TransientTelegramError
+from tg_video_downloader.gui import app as app_module
 from tg_video_downloader.gui.app import DownloaderApp
 
 
@@ -37,6 +38,20 @@ class FakeVar:
         return self.value
 
     def set(self, value: str) -> None:
+        self.value = value
+
+
+class FakeText:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def configure(self, **_values) -> None:
+        return None
+
+    def delete(self, *_args) -> None:
+        self.value = ""
+
+    def insert(self, _index: str, value: str) -> None:
         self.value = value
 
 
@@ -159,6 +174,83 @@ def test_turning_monitoring_off_also_turns_history_off() -> None:
 
     assert app._selected_ids == set()
     assert app._history_ids == set()
+
+
+def test_format_progress_uses_binary_units() -> None:
+    text, speed = app_module.format_download_progress(
+        {
+            "downloaded_bytes": 5 * 1024**2,
+            "total_bytes": 10 * 1024**2,
+            "percent": 50.0,
+            "bytes_per_second": 2 * 1024**2,
+            "resumed": True,
+        }
+    )
+
+    assert text == "5.00 MiB / 10.00 MiB（50.0%，断点续传）"
+    assert speed == "2.00 MiB/s"
+
+
+@pytest.mark.parametrize("progress", [None, {}, {"downloaded_bytes": "bad"}])
+def test_format_progress_tolerates_missing_or_malformed_data(progress) -> None:
+    assert app_module.format_download_progress(progress) == ("-", "-")
+
+
+def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app.controller = SimpleNamespace(
+        read_status=lambda: {
+            "status": "running",
+            "updated_at": "2026-08-25T12:00:00+00:00",
+            "current_file": "video.mp4",
+            "progress": {
+                "downloaded_bytes": 5 * 1024**2,
+                "total_bytes": 10 * 1024**2,
+                "percent": 50.0,
+                "bytes_per_second": 2 * 1024**2,
+                "resumed": False,
+            },
+            "counts": {"paused_history": 3},
+            "groups": [
+                {
+                    "chat_id": -1001,
+                    "title": "频道",
+                    "download_history": False,
+                    "history_complete": False,
+                    "access_error": None,
+                }
+            ],
+        }
+    )
+    app.status_vars = {
+        key: FakeVar()
+        for key in (
+            "status",
+            "updated_at",
+            "current_file",
+            "download_progress",
+            "download_speed",
+            "pending_live",
+            "pending_history",
+            "paused_history",
+            "completed",
+            "retry_wait",
+            "permanent_error",
+            "last_error",
+        )
+    }
+    app.group_status = FakeText()
+    app.after = lambda *_args: "after-status"
+
+    app._refresh_status()
+
+    assert app.status_vars["download_progress"].get() == (
+        "5.00 MiB / 10.00 MiB（50.0%）"
+    )
+    assert app.status_vars["download_speed"].get() == "2.00 MiB/s"
+    assert app.status_vars["paused_history"].get() == "3"
+    assert app.group_status.value == "频道：监听新内容；历史下载已暂停"
 
 
 def test_expired_qr_refreshes_current_generation() -> None:
