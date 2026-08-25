@@ -18,6 +18,8 @@ class ProjectPaths:
     database: Path
     heartbeat: Path
     stop_flag: Path
+    gui_lock: Path
+    gui_activation: Path
 
     @classmethod
     def from_root(cls, root: Path) -> "ProjectPaths":
@@ -36,6 +38,8 @@ class ProjectPaths:
             database=runtime / "state.sqlite3",
             heartbeat=runtime / "heartbeat.json",
             stop_flag=runtime / "stop.flag",
+            gui_lock=runtime / "gui.lock",
+            gui_activation=runtime / "gui-activate.request",
         )
 
     @property

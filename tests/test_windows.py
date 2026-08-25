@@ -79,3 +79,15 @@ def test_hidden_supervisor_allows_slow_running_process(
     monkeypatch.setattr(windows.time, "sleep", lambda _seconds: None)
 
     assert windows.start_hidden_supervisor(tmp_path) is process
+
+
+def test_single_instance_supports_context_specific_error_message(tmp_path: Path) -> None:
+    lock_path = tmp_path / "gui.lock"
+
+    with windows.SingleInstance(lock_path):
+        with pytest.raises(RuntimeError, match="配置器已经在运行"):
+            with windows.SingleInstance(
+                lock_path,
+                already_running_message="配置器已经在运行",
+            ):
+                pass

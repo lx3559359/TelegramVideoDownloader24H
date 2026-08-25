@@ -22,3 +22,12 @@ def test_reject_download_directory_outside_project(tmp_path: Path) -> None:
         assert "项目目录之外" in str(error)
     else:
         raise AssertionError("outside path should be rejected")
+
+
+def test_gui_control_files_stay_inside_runtime(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+
+    assert paths.gui_lock == paths.runtime / "gui.lock"
+    assert paths.gui_activation == paths.runtime / "gui-activate.request"
+    assert paths.gui_lock.is_relative_to(paths.root)
+    assert paths.gui_activation.is_relative_to(paths.root)

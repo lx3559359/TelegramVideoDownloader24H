@@ -15,8 +15,14 @@ SUPERVISOR_START_POLL_SECONDS = 0.05
 
 
 class SingleInstance:
-    def __init__(self, lock_path: Path) -> None:
+    def __init__(
+        self,
+        lock_path: Path,
+        *,
+        already_running_message: str = "下载器已经在运行",
+    ) -> None:
         self.lock_path = lock_path
+        self.already_running_message = already_running_message
         self._handle = None
 
     def __enter__(self) -> "SingleInstance":
@@ -38,7 +44,7 @@ class SingleInstance:
             handle.flush()
         except OSError as error:
             handle.close()
-            raise RuntimeError("下载器已经在运行") from error
+            raise RuntimeError(self.already_running_message) from error
         self._handle = handle
         return self
 
