@@ -3,10 +3,15 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import TracebackType
 
 from tg_video_downloader.paths import ProjectPaths
+
+
+SUPERVISOR_START_OBSERVE_SECONDS = 2.0
+SUPERVISOR_START_POLL_SECONDS = 0.05
 
 
 class SingleInstance:
@@ -95,9 +100,16 @@ def is_stop_requested(paths: ProjectPaths) -> bool:
 
 def start_hidden_supervisor(project_root: Path) -> subprocess.Popen[bytes]:
     root = project_root.resolve()
+    paths = ProjectPaths.from_root(root)
     script = root / "scripts" / "run-supervisor.ps1"
-    flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
-    return subprocess.Popen(
+    supervisor_pid = paths.runtime / "supervisor.pid"
+    ready_files = (
+        supervisor_pid,
+        paths.runtime / "downloader.lock",
+        paths.heartbeat,
+    )
+    initial_states = {path: _file_state(path) for path in ready_files}
+    process = subprocess.Popen(
         [
             "powershell.exe",
             "-NoProfile",
@@ -107,5 +119,29 @@ def start_hidden_supervisor(project_root: Path) -> subprocess.Popen[bytes]:
             str(script),
         ],
         cwd=root,
-        creationflags=flags,
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
+    if initial_states[supervisor_pid] is not None:
+        return process
+
+    deadline = time.monotonic() + SUPERVISOR_START_OBSERVE_SECONDS
+    while time.monotonic() < deadline:
+        if any(
+            (current := _file_state(path)) is not None
+            and current != initial_states[path]
+            for path in ready_files
+        ):
+            return process
+        returncode = process.poll()
+        if returncode is not None:
+            raise RuntimeError(f"后台启动器提前退出，退出码 {returncode}")
+        time.sleep(SUPERVISOR_START_POLL_SECONDS)
+    return process
+
+
+def _file_state(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
