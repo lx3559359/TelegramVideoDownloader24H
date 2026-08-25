@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS groups (
     chat_id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
+    download_history INTEGER NOT NULL DEFAULT 1,
     latest_seen_id INTEGER,
     history_cursor_id INTEGER,
     history_complete INTEGER NOT NULL DEFAULT 0,
@@ -64,6 +65,7 @@ class GroupState:
     chat_id: int
     title: str
     enabled: bool
+    download_history: bool
     latest_seen_id: int | None
     history_cursor_id: int | None
     history_complete: bool
@@ -79,6 +81,15 @@ class StateStore:
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.executescript(SCHEMA)
+        columns = {
+            str(row["name"])
+            for row in self._connection.execute("PRAGMA table_info(groups)").fetchall()
+        }
+        if "download_history" not in columns:
+            self._connection.execute(
+                "ALTER TABLE groups ADD COLUMN download_history "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
         self._connection.commit()
 
     def close(self) -> None:
@@ -97,13 +108,17 @@ class StateStore:
             self._connection.execute("UPDATE groups SET enabled = 0")
             self._connection.executemany(
                 """
-                INSERT INTO groups(chat_id, title, enabled)
-                VALUES (?, ?, 1)
+                INSERT INTO groups(chat_id, title, enabled, download_history)
+                VALUES (?, ?, 1, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     title = excluded.title,
-                    enabled = 1
+                    enabled = 1,
+                    download_history = excluded.download_history
                 """,
-                ((target.chat_id, target.title) for target in targets),
+                (
+                    (target.chat_id, target.title, int(target.download_history))
+                    for target in targets
+                ),
             )
         return added, removed
 
@@ -237,6 +252,7 @@ class StateStore:
                 FROM jobs
                 JOIN groups ON groups.chat_id = jobs.chat_id
                 WHERE groups.enabled = 1
+                  AND (jobs.source <> 'history' OR groups.download_history = 1)
                   AND (
                     jobs.status = 'pending'
                     OR (
@@ -277,6 +293,17 @@ class StateStore:
             status=JobStatus.DOWNLOADING,
             attempts=attempts,
         )
+
+    def release(self, job: DownloadJob) -> None:
+        with self._connection:
+            self._connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'pending', next_attempt_at = NULL, error = NULL
+                WHERE chat_id = ? AND message_id = ? AND status = 'downloading'
+                """,
+                (job.chat_id, job.message_id),
+            )
 
     def mark_completed(self, job: DownloadJob, final_path: Path) -> None:
         with self._connection:
@@ -362,17 +389,37 @@ class StateStore:
         row = self._connection.execute(
             """
             SELECT
-                SUM(CASE WHEN status = 'pending' AND priority = 0 THEN 1 ELSE 0 END) AS pending_live,
-                SUM(CASE WHEN status = 'pending' AND priority = 10 THEN 1 ELSE 0 END) AS pending_history,
-                SUM(CASE WHEN status = 'retry_wait' THEN 1 ELSE 0 END) AS retry_wait,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                SUM(CASE WHEN status = 'permanent_error' THEN 1 ELSE 0 END) AS permanent_error
+                SUM(CASE WHEN jobs.status = 'pending' AND jobs.priority = 0
+                              AND groups.enabled = 1
+                    THEN 1 ELSE 0 END) AS pending_live,
+                SUM(CASE WHEN jobs.status = 'pending' AND jobs.priority = 10
+                              AND groups.enabled = 1
+                              AND groups.download_history = 1
+                    THEN 1 ELSE 0 END) AS pending_history,
+                SUM(CASE WHEN jobs.source = 'history'
+                              AND jobs.status IN ('pending', 'retry_wait')
+                              AND groups.enabled = 1
+                              AND groups.download_history = 0
+                    THEN 1 ELSE 0 END) AS paused_history,
+                SUM(CASE WHEN jobs.status = 'retry_wait'
+                              AND groups.enabled = 1
+                              AND (
+                                  jobs.source <> 'history'
+                                  OR groups.download_history = 1
+                              )
+                    THEN 1 ELSE 0 END) AS retry_wait,
+                SUM(CASE WHEN jobs.status = 'completed'
+                    THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN jobs.status = 'permanent_error'
+                    THEN 1 ELSE 0 END) AS permanent_error
             FROM jobs
+            JOIN groups ON groups.chat_id = jobs.chat_id
             """
         ).fetchone()
         return {
             "pending_live": int(row["pending_live"] or 0),
             "pending_history": int(row["pending_history"] or 0),
+            "paused_history": int(row["paused_history"] or 0),
             "retry_wait": int(row["retry_wait"] or 0),
             "completed": int(row["completed"] or 0),
             "permanent_error": int(row["permanent_error"] or 0),
@@ -384,6 +431,7 @@ class StateStore:
             chat_id=int(row["chat_id"]),
             title=str(row["title"]),
             enabled=bool(row["enabled"]),
+            download_history=bool(row["download_history"]),
             latest_seen_id=row["latest_seen_id"],
             history_cursor_id=row["history_cursor_id"],
             history_complete=bool(row["history_complete"]),

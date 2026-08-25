@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -65,6 +66,60 @@ def test_jobs_are_deduplicated_and_live_is_claimed_first(
     assert claimed.source == JobSource.LIVE
 
 
+def test_legacy_groups_table_migrates_history_policy(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE groups (chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, "
+        "enabled INTEGER NOT NULL DEFAULT 1, latest_seen_id INTEGER, "
+        "history_cursor_id INTEGER, history_complete INTEGER NOT NULL DEFAULT 0, "
+        "access_error TEXT)"
+    )
+    connection.execute("INSERT INTO groups(chat_id, title) VALUES(-1001, '旧频道')")
+    connection.commit()
+    connection.close()
+
+    state = StateStore(database)
+    try:
+        assert state.get_group(-1001).download_history is True
+    finally:
+        state.close()
+
+
+def test_paused_history_does_not_block_live_and_can_resume(
+    store: StateStore,
+    history_message: MessageInfo,
+    live_message: MessageInfo,
+) -> None:
+    store.reconcile_targets((GroupTarget(-1001, "群", False),))
+    store.upsert_job(history_message, "群", JobSource.HISTORY)
+    store.upsert_job(live_message, "群", JobSource.LIVE)
+
+    live_job = store.claim_next()
+    assert live_job is not None
+    assert live_job.source == JobSource.LIVE
+    assert store.claim_next() is None
+    assert store.counts()["paused_history"] == 1
+
+    store.reconcile_targets((GroupTarget(-1001, "群", True),))
+    history_job = store.claim_next()
+    assert history_job is not None
+    assert history_job.source == JobSource.HISTORY
+
+
+def test_release_returns_downloading_job_to_pending(
+    store: StateStore,
+    live_message: MessageInfo,
+) -> None:
+    store.upsert_job(live_message, "群", JobSource.LIVE)
+    job = store.claim_next()
+    assert job is not None
+
+    store.release(job)
+
+    assert store.claim_next() is not None
+
+
 def test_recover_inflight_and_preserve_cursors(
     store: StateStore,
     history_message: MessageInfo,
@@ -111,6 +166,7 @@ def test_reconcile_status_transitions_and_counts(
     assert store.counts() == {
         "pending_live": 0,
         "pending_history": 0,
+        "paused_history": 0,
         "retry_wait": 1,
         "completed": 1,
         "permanent_error": 0,
