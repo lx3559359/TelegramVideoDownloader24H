@@ -750,7 +750,8 @@ class DownloaderApp(ttk.Frame):
         messagebox.showinfo("已保存", f"已保存 {len(groups)} 个群组/频道")
 
     def _start_service(self) -> None:
-        self._call_sync(self.controller.start)
+        self.controller.start()
+        self.status_vars["status"].set("starting")
 
     def _stop_service(self) -> None:
         self._call_sync(self.controller.stop)

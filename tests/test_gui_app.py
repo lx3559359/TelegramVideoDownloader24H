@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from tg_video_downloader.gateway import QrLoginExpiredError, TransientTelegramError
@@ -113,6 +115,18 @@ def test_saved_session_probe_error_keeps_session_and_shows_generic_status() -> N
 
     assert finished == ["尚未登录"]
     assert app.account_status_var.get() == "暂时无法检查已有会话，可稍后重试"
+
+
+def test_start_service_sets_starting_status() -> None:
+    app = object.__new__(DownloaderApp)
+    started: list[bool] = []
+    app.controller = SimpleNamespace(start=lambda: started.append(True))
+    app.status_vars = {"status": FakeVar("stopped")}
+
+    app._start_service()
+
+    assert started == [True]
+    assert app.status_vars["status"].get() == "starting"
 
 
 def test_expired_qr_refreshes_current_generation() -> None:
