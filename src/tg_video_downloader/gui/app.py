@@ -546,10 +546,11 @@ class DownloaderApp(ttk.Frame):
     def _handle_qr_password_error(self, error: Exception, generation: int) -> None:
         if not self._is_current_qr_generation(generation):
             return
+        safe_message = self._safe_error(error)
         self.qr_password_button.state(["!disabled"])
         self.qr_password_var.set("")
         self.account_status_var.set("二步验证密码错误，请重试")
-        self._show_error(error)
+        messagebox.showerror("操作失败", safe_message)
 
     def _manual_refresh_qr(self) -> None:
         self._qr_generation += 1
@@ -831,6 +832,7 @@ class DownloaderApp(ttk.Frame):
         self.code_var.set("")
         self.password_var.set("")
         self.qr_password_var.set("")
+        self.qr_canvas.delete("all")
         self.bridge.close()
 
 

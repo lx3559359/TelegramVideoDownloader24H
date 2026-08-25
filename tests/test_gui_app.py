@@ -1,3 +1,5 @@
+import pytest
+
 from tg_video_downloader.gateway import QrLoginExpiredError, TransientTelegramError
 from tg_video_downloader.gui.app import DownloaderApp
 
@@ -16,9 +18,13 @@ class FakeFrame:
 class FakeButton:
     def __init__(self) -> None:
         self.text = ""
+        self.states: list[str] = []
 
     def configure(self, **values: str) -> None:
         self.text = values["text"]
+
+    def state(self, values: list[str]) -> None:
+        self.states = values
 
 
 class FakeVar:
@@ -102,3 +108,31 @@ def test_transient_qr_error_schedules_server_retry_time() -> None:
     assert app._qr_retry_attempt == 1
     assert app._qr_retry_after == "after-1"
     assert scheduled[0][0] == 73_000
+
+
+def test_qr_password_error_is_redacted_before_password_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app._qr_generation = 4
+    app.api_hash_var = FakeVar("")
+    app.phone_var = FakeVar("")
+    app.code_var = FakeVar("")
+    app.password_var = FakeVar("")
+    app.qr_password_var = FakeVar("private-password")
+    app.account_status_var = FakeVar()
+    app.qr_password_button = FakeButton()
+    shown: list[str] = []
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.app.messagebox.showerror",
+        lambda _title, message: shown.append(message),
+    )
+
+    app._handle_qr_password_error(
+        RuntimeError("private-password was rejected"),
+        4,
+    )
+
+    assert shown == ["*** was rejected"]
+    assert app.qr_password_var.get() == ""

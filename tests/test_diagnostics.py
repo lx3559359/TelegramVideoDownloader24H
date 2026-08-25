@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,6 +30,30 @@ def configure_valid_project(tmp_path: Path) -> tuple[ProjectPaths, Credentials, 
         {"status": "stopped", "updated_at": datetime.now(UTC).isoformat()}
     )
     return paths, credentials, group
+
+
+def test_diagnostics_module_loads_when_qrcode_import_is_unavailable() -> None:
+    probe = """
+import sys
+
+class BlockQrcode:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "qrcode" or fullname.startswith("qrcode."):
+            raise ModuleNotFoundError("blocked qrcode")
+        return None
+
+sys.meta_path.insert(0, BlockQrcode())
+import tg_video_downloader.diagnostics
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio

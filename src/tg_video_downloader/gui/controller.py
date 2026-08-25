@@ -135,6 +135,12 @@ class GuiController:
                 challenge = None
             else:
                 challenge = await gateway.start_qr_login()
+        except asyncio.CancelledError:
+            try:
+                await gateway.disconnect()
+            except Exception:
+                pass
+            raise
         except Exception:
             try:
                 await gateway.disconnect()
@@ -190,6 +196,12 @@ class GuiController:
         try:
             await gateway.connect()
             await gateway.send_login_code(credentials.phone)
+        except asyncio.CancelledError:
+            try:
+                await gateway.disconnect()
+            except Exception:
+                pass
+            raise
         except Exception:
             await gateway.disconnect()
             raise

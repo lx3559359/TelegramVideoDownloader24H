@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -182,6 +183,61 @@ async def test_cancel_login_is_idempotent(tmp_path: Path) -> None:
 
     assert controller.login_active is False
     assert gateway.connected is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_qr_start_disconnects_unregistered_gateway(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+
+    class SlowConnectGateway(LoginGateway):
+        async def connect(self) -> None:
+            self.connected = True
+            entered.set()
+            await asyncio.Event().wait()
+
+    paths = ProjectPaths.from_root(tmp_path)
+    gateway = SlowConnectGateway()
+    controller = GuiController(paths, lambda *_: gateway)
+    task = asyncio.create_task(
+        controller.start_qr_login(Credentials(12345, "hash"))
+    )
+    await entered.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert gateway.connected is False
+    assert controller.login_active is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_phone_code_request_disconnects_unregistered_gateway(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+
+    class SlowCodeGateway(LoginGateway):
+        async def send_login_code(self, phone: str) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+    paths = ProjectPaths.from_root(tmp_path)
+    gateway = SlowCodeGateway()
+    controller = GuiController(paths, lambda *_: gateway)
+    task = asyncio.create_task(
+        controller.send_code(Credentials(12345, "hash", "+8613800000000"))
+    )
+    await entered.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert gateway.connected is False
+    assert controller.login_active is False
 
 
 @pytest.mark.asyncio

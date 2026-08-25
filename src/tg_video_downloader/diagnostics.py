@@ -19,7 +19,6 @@ from tg_video_downloader.gateway import (
     TelegramGateway,
     TransientTelegramError,
 )
-from tg_video_downloader.gui.qr_view import make_qr_matrix
 from tg_video_downloader.models import AppConfig, Credentials
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
@@ -196,6 +195,8 @@ class Doctor:
         return DiagnosticCheck("dependencies", "pass", "，".join(installed))
 
     def _check_qr_code(self) -> DiagnosticCheck:
+        from tg_video_downloader.gui.qr_view import make_qr_matrix
+
         matrix = make_qr_matrix("tg://login?token=doctor-probe")
         if not matrix or len(matrix) != len(matrix[0]):
             return DiagnosticCheck("qr_code", "fail", "二维码矩阵生成失败")
