@@ -21,6 +21,11 @@ from tg_video_downloader.models import DownloadJob
 from tg_video_downloader.naming import build_final_path
 from tg_video_downloader.paths import ProjectPaths
 from tg_video_downloader.state import StateStore
+from tg_video_downloader.storage import (
+    assert_download_path,
+    build_part_path,
+    ensure_partial_directory,
+)
 
 
 SAFETY_FREE_BYTES = 512 * 1024 * 1024
@@ -59,6 +64,8 @@ class DownloadWorker:
         state: StateStore,
         gateway: TelegramGateway,
         *,
+        download_root: Callable[[], Path] | None = None,
+        disk_usage: Callable[[Path], Any] = shutil.disk_usage,
         monotonic: Callable[[], float] = monotonic_clock,
         stall_seconds: float = 120.0,
         monitor_seconds: float = 1.0,
@@ -66,7 +73,9 @@ class DownloadWorker:
         self.paths = paths
         self.state = state
         self.gateway = gateway
-        self.disk_guard = DiskGuard(paths.downloads)
+        self._download_root = download_root or (lambda: paths.downloads)
+        self._disk_usage = disk_usage
+        self.disk_guard = DiskGuard(paths.downloads, usage=disk_usage)
         self._monotonic = monotonic
         self._stall_seconds = stall_seconds
         self._monitor_seconds = monitor_seconds
@@ -90,19 +99,44 @@ class DownloadWorker:
         if job is None:
             return "idle"
 
-        final_path = build_final_path(self.paths, job.group_title, job.message)
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        part_path = self._part_path(job.chat_id, job.message_id)
-        self._current_file = final_path.name
-
+        legacy_part = self._part_path(job.chat_id, job.message_id)
+        download_task: asyncio.Task[Path] | None = None
+        part_path: Path | None = None
         try:
-            if _matches_expected_size(final_path, job.message.size):
-                part_path.unlink(missing_ok=True)
-                self.state.mark_completed(job, final_path)
-                return "completed"
-
-            download_task: asyncio.Task[Path] | None = None
             try:
+                if job.output_root is None:
+                    selected = (
+                        self.paths.downloads
+                        if legacy_part.is_file()
+                        else self._download_root()
+                    )
+                    job = self.state.bind_output_root(job, selected)
+                root = job.output_root
+                if root is None:
+                    raise RuntimeError("下载任务缺少输出目录")
+
+                final_path = build_final_path(
+                    self.paths,
+                    job.group_title,
+                    job.message,
+                    download_root=root,
+                )
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                partial_directory = ensure_partial_directory(root)
+                part_path = build_part_path(root, job.chat_id, job.message_id)
+                if part_path.parent != partial_directory:
+                    raise RuntimeError("断点目录解析不一致")
+                if legacy_part.is_file() and legacy_part != part_path:
+                    if part_path.exists():
+                        raise OSError("旧断点与目标断点同时存在，拒绝覆盖任一文件")
+                    os.replace(legacy_part, part_path)
+                self._current_file = final_path.name
+
+                if _matches_expected_size(final_path, job.message.size):
+                    part_path.unlink(missing_ok=True)
+                    self.state.mark_completed(job, final_path)
+                    return "completed"
+
                 offset = _resume_offset(part_path, job.message.size)
                 if job.message.size is not None and offset == job.message.size:
                     os.replace(part_path, final_path)
@@ -114,7 +148,12 @@ class DownloadWorker:
                     if job.message.size is None
                     else max(0, job.message.size - offset)
                 )
-                if not self.disk_guard.has_space(remaining):
+                disk_guard = (
+                    self.disk_guard
+                    if root == self.paths.downloads
+                    else DiskGuard(root, usage=self._disk_usage)
+                )
+                if not disk_guard.has_space(remaining):
                     self.state.mark_retry(
                         job,
                         "磁盘可用空间低于安全阈值",
@@ -183,7 +222,10 @@ class DownloadWorker:
                         await _wait_or_stop(stop, self._monitor_seconds)
 
                 actual_path = await download_task
-                actual_path = self.paths.assert_within_root(Path(actual_path))
+                actual_path = assert_download_path(
+                    part_path.parent,
+                    Path(actual_path),
+                )
                 if actual_path != part_path:
                     os.replace(actual_path, part_path)
                 if not _matches_expected_size(part_path, job.message.size):
@@ -198,7 +240,8 @@ class DownloadWorker:
             except AuthenticationRequiredError:
                 raise
             except PermanentMessageError as error:
-                part_path.unlink(missing_ok=True)
+                if part_path is not None:
+                    part_path.unlink(missing_ok=True)
                 self.state.mark_permanent_error(job, str(error))
                 return "permanent_error"
             except GroupAccessError as error:

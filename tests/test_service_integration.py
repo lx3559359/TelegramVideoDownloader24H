@@ -18,6 +18,7 @@ from tg_video_downloader.naming import build_final_path
 from tg_video_downloader.paths import ProjectPaths
 from tg_video_downloader.service import DownloaderService
 from tg_video_downloader.state import StateStore
+from tg_video_downloader.storage import build_part_path
 from tg_video_downloader.windows import request_stop
 from tg_video_downloader.worker import DownloadWorker
 from tests.fakes import FakeTelegramGateway
@@ -351,7 +352,11 @@ async def test_service_stop_cancels_active_download_and_preserves_partial(
 
     assert await asyncio.wait_for(service_task, timeout=2) == 0
     assert cancelled.is_set()
-    part_path = paths.temp / f"{message.chat_id}_{message.message_id}.part"
+    part_path = build_part_path(
+        paths.downloads,
+        message.chat_id,
+        message.message_id,
+    )
     assert part_path.exists()
     assert part_path.stat().st_size == DOWNLOAD_CHUNK_SIZE
     reopened = StateStore(paths.database)

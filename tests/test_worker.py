@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from tg_video_downloader.models import GroupTarget, JobSource, MessageInfo
 from tg_video_downloader.naming import build_final_path
 from tg_video_downloader.paths import ProjectPaths
 from tg_video_downloader.state import StateStore
+from tg_video_downloader.storage import build_part_path
 from tg_video_downloader.worker import DiskGuard, DownloadWorker, SAFETY_FREE_BYTES
 from tests.fakes import FakeTelegramGateway
 
@@ -463,5 +465,175 @@ def test_recover_preserves_partial_file(tmp_path: Path) -> None:
         assert matching.stat().st_size == DOWNLOAD_CHUNK_SIZE
         assert unrelated.read_bytes() == b"keep"
         assert state.counts()["pending_live"] == 1
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_unbound_job_uses_current_download_root(tmp_path: Path) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    selected = (tmp_path / "external").resolve()
+    message = make_video(20)
+    state.upsert_job(message, "群", JobSource.LIVE)
+    gateway.download_payloads[(message.chat_id, message.message_id)] = b"payload"
+    worker = DownloadWorker(paths, state, gateway, download_root=lambda: selected)
+    try:
+        assert await worker.run_one() == "completed"
+        stored = state.get_job(message.chat_id, message.message_id)
+        assert stored is not None
+        assert stored.output_root == selected
+        assert build_final_path(
+            paths,
+            "群",
+            message,
+            download_root=selected,
+        ).read_bytes() == b"payload"
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_bound_retry_ignores_new_default_root(tmp_path: Path) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    first = (tmp_path / "first").resolve()
+    second = (tmp_path / "second").resolve()
+    current = [first]
+    message = make_video(21)
+    state.upsert_job(message, "群", JobSource.LIVE)
+    claimed = state.claim_next()
+    assert claimed is not None
+    state.release(state.bind_output_root(claimed, first))
+    gateway.download_payloads[(message.chat_id, message.message_id)] = b"payload"
+    worker = DownloadWorker(paths, state, gateway, download_root=lambda: current[0])
+    current[0] = second
+    try:
+        assert await worker.run_one() == "completed"
+        assert build_final_path(
+            paths,
+            "群",
+            message,
+            download_root=first,
+        ).is_file()
+        assert not build_final_path(
+            paths,
+            "群",
+            message,
+            download_root=second,
+        ).exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_disk_guard_checks_bound_volume(tmp_path: Path) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    selected = (tmp_path / "external").resolve()
+    message = make_video(22)
+    state.upsert_job(message, "群", JobSource.LIVE)
+    gateway.download_payloads[(message.chat_id, message.message_id)] = b"payload"
+    seen: list[Path] = []
+    worker = DownloadWorker(
+        paths,
+        state,
+        gateway,
+        download_root=lambda: selected,
+        disk_usage=lambda path: seen.append(path) or SimpleNamespace(free=10**12),
+    )
+    try:
+        assert await worker.run_one() == "completed"
+        assert seen == [selected]
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_part_binds_to_old_root_before_resume(tmp_path: Path) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    payload = b"a" * (DOWNLOAD_CHUNK_SIZE * 2)
+    message = make_video(23, size=len(payload))
+    state.upsert_job(message, "群", JobSource.LIVE)
+    legacy = paths.temp / f"{message.chat_id}_{message.message_id}.part"
+    legacy.write_bytes(payload[:DOWNLOAD_CHUNK_SIZE])
+    gateway.download_payloads[(message.chat_id, message.message_id)] = payload
+    worker = DownloadWorker(
+        paths,
+        state,
+        gateway,
+        download_root=lambda: (tmp_path / "new-root").resolve(),
+    )
+    try:
+        assert await worker.run_one() == "completed"
+        stored = state.get_job(message.chat_id, message.message_id)
+        assert stored is not None
+        assert stored.output_root == paths.downloads
+        assert gateway.download_offsets == [DOWNLOAD_CHUNK_SIZE]
+        assert not legacy.exists()
+        assert not build_part_path(
+            paths.downloads,
+            message.chat_id,
+            message.message_id,
+        ).exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_selected_root_retries_without_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    selected = (tmp_path / "missing-drive").resolve()
+    message = make_video(24)
+    state.upsert_job(message, "群", JobSource.LIVE)
+    monkeypatch.setattr(
+        "tg_video_downloader.worker.ensure_partial_directory",
+        lambda _root: (_ for _ in ()).throw(OSError("drive unavailable")),
+    )
+    worker = DownloadWorker(paths, state, gateway, download_root=lambda: selected)
+    try:
+        assert await worker.run_one() == "retry_wait"
+        stored = state.get_job(message.chat_id, message.message_id)
+        assert stored is not None
+        assert stored.output_root == selected
+        assert not build_final_path(paths, "群", message).exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_legacy_migration_preserves_source_part(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, state, gateway = prepare(tmp_path)
+    message = make_video(25, size=DOWNLOAD_CHUNK_SIZE * 2)
+    state.upsert_job(message, "群", JobSource.LIVE)
+    legacy = paths.temp / f"{message.chat_id}_{message.message_id}.part"
+    expected = b"a" * DOWNLOAD_CHUNK_SIZE
+    legacy.write_bytes(expected)
+    gateway.download_payloads[(message.chat_id, message.message_id)] = (
+        b"a" * (DOWNLOAD_CHUNK_SIZE * 2)
+    )
+    destination = build_part_path(
+        paths.downloads,
+        message.chat_id,
+        message.message_id,
+    )
+    real_replace = os.replace
+
+    def fail_migration(source: Path, target: Path) -> None:
+        if Path(source) == legacy and Path(target) == destination:
+            raise OSError("move failed")
+        real_replace(source, target)
+
+    monkeypatch.setattr(
+        "tg_video_downloader.worker.os.replace",
+        fail_migration,
+    )
+    worker = DownloadWorker(paths, state, gateway)
+    try:
+        assert await worker.run_one() == "retry_wait"
+        assert legacy.read_bytes() == expected
     finally:
         state.close()
