@@ -22,6 +22,10 @@ from tg_video_downloader.gateway import (
 from tg_video_downloader.models import AppConfig, Credentials
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.storage import (
+    effective_download_root,
+    require_writable_download_root,
+)
 from tg_video_downloader.worker import SAFETY_FREE_BYTES
 
 
@@ -98,9 +102,21 @@ class Doctor:
                 value for value in (credentials.api_hash, credentials.phone) if value
             )
 
+        if config is None:
+            download_root_check = DiagnosticCheck(
+                "download_root",
+                "fail",
+                "配置无效，未检查下载目录",
+            )
+        else:
+            download_root_check = self._run_local(
+                "download_root",
+                lambda: self._check_download_root(config),
+            )
+
         checks.extend(
             (
-                self._run_local("disk", self._check_disk),
+                download_root_check,
                 self._run_local("database", self._check_database),
                 self._run_local("heartbeat", self._check_heartbeat),
                 await self._check_telegram(config, credentials),
@@ -265,13 +281,22 @@ class Doctor:
             )
         return credentials, DiagnosticCheck("credentials", "pass", "账号凭据格式有效")
 
-    def _check_disk(self) -> DiagnosticCheck:
-        free = int(shutil.disk_usage(self.paths.downloads).free)
+    def _check_download_root(self, config: AppConfig) -> DiagnosticCheck:
+        root = effective_download_root(self.paths, config)
+        try:
+            checked = require_writable_download_root(self.paths, root)
+            free = int(shutil.disk_usage(checked).free)
+        except FileNotFoundError as error:
+            return DiagnosticCheck(
+                "download_root",
+                "warning",
+                f"下载盘暂不可用：{root}（{self._format_error(error)}）",
+            )
         status: DiagnosticStatus = "pass" if free >= SAFETY_FREE_BYTES else "fail"
         return DiagnosticCheck(
-            "disk",
+            "download_root",
             status,
-            f"下载盘可用空间 {free / (1024**3):.2f} GiB",
+            f"下载目录 {checked}，可用空间 {free / (1024**3):.2f} GiB",
         )
 
     def _check_database(self) -> DiagnosticCheck:

@@ -1,8 +1,10 @@
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -126,7 +128,7 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
         "login_task",
         "config",
         "credentials",
-        "disk",
+        "download_root",
         "database",
         "heartbeat",
         "telegram",
@@ -142,6 +144,91 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
     assert "tg://login" not in serialized
     assert not saved.with_suffix(saved.suffix + ".tmp").exists()
     assert gateway.connected is False
+
+
+def test_download_root_check_uses_configured_volume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _, _ = configure_valid_project(tmp_path / "project")
+    selected = (tmp_path / "external").resolve()
+    store = ConfigStore(paths)
+    store.save_config(replace(store.load_config(), download_root=selected))
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        "tg_video_downloader.diagnostics.shutil.disk_usage",
+        lambda path: seen.append(Path(path))
+        or SimpleNamespace(free=2 * 1024**3),
+    )
+    doctor = Doctor(paths, gateway_factory=lambda *_: FakeTelegramGateway())
+
+    check = doctor._check_download_root(store.load_config())
+
+    assert check.status == "pass"
+    assert seen == [selected]
+    assert str(selected) in check.message
+
+
+def test_download_root_check_rejects_a_file(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path / "project")
+    selected = tmp_path / "occupied"
+    selected.write_text("not a directory", encoding="utf-8")
+    config = AppConfig(download_root=selected.resolve())
+    doctor = Doctor(paths, gateway_factory=lambda *_: FakeTelegramGateway())
+
+    check = doctor._run_local(
+        "download_root",
+        lambda: doctor._check_download_root(config),
+    )
+
+    assert check.status == "fail"
+    assert "文件夹" in check.message
+
+
+def test_download_root_check_warns_when_removable_drive_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path / "project")
+    selected = (tmp_path / "unavailable").resolve()
+    original_mkdir = Path.mkdir
+
+    def fail_selected(path: Path, *args, **kwargs) -> None:
+        if path.resolve() == selected:
+            raise FileNotFoundError("drive unavailable")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_selected)
+    doctor = Doctor(paths, gateway_factory=lambda *_: FakeTelegramGateway())
+
+    check = doctor._check_download_root(AppConfig(download_root=selected))
+
+    assert check.status == "warning"
+    assert "暂不可用" in check.message
+    assert str(selected) in check.message
+
+
+def test_download_root_check_does_not_enumerate_user_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path / "project")
+    selected = (tmp_path / "external").resolve()
+    selected.mkdir()
+    monkeypatch.setattr(
+        Path,
+        "iterdir",
+        lambda _path: (_ for _ in ()).throw(AssertionError("must not enumerate")),
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.diagnostics.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=2 * 1024**3),
+    )
+    doctor = Doctor(paths, gateway_factory=lambda *_: FakeTelegramGateway())
+
+    check = doctor._check_download_root(AppConfig(download_root=selected))
+
+    assert check.status == "pass"
 
 
 @pytest.mark.asyncio
