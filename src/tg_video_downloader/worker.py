@@ -177,7 +177,10 @@ class DownloadWorker:
                         raise TransientTelegramError(
                             "下载连续 120 秒没有进度"
                         )
-                    await asyncio.sleep(self._monitor_seconds)
+                    if stop is None:
+                        await asyncio.sleep(self._monitor_seconds)
+                    else:
+                        await _wait_or_stop(stop, self._monitor_seconds)
 
                 actual_path = await download_task
                 actual_path = self.paths.assert_within_root(Path(actual_path))
