@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import mimetypes
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -15,6 +17,14 @@ class AuthenticationRequiredError(RuntimeError):
     pass
 
 
+class InvalidApiCredentialsError(ValueError):
+    pass
+
+
+class QrLoginExpiredError(RuntimeError):
+    pass
+
+
 class GroupAccessError(RuntimeError):
     pass
 
@@ -24,7 +34,15 @@ class PermanentMessageError(RuntimeError):
 
 
 class TransientTelegramError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+@dataclass(frozen=True)
+class QrLoginChallenge:
+    url: str
+    expires_at: datetime
 
 
 MessageHandler = Callable[[MessageInfo], Awaitable[None]]
@@ -45,6 +63,16 @@ class TelegramGateway(Protocol):
         code: str,
         password: str | None = None,
     ) -> None: ...
+
+    async def start_qr_login(self) -> QrLoginChallenge: ...
+
+    async def refresh_qr_login(self) -> QrLoginChallenge: ...
+
+    async def wait_qr_login(self) -> None: ...
+
+    async def complete_password(self, password: str) -> None: ...
+
+    async def log_out(self) -> None: ...
 
     async def list_groups(self) -> tuple[GroupTarget, ...]: ...
 
@@ -147,6 +175,7 @@ class TelethonGateway:
         )
         self._event_callback: Callable[[Any], Awaitable[None]] | None = None
         self._password_required = False
+        self._qr_login: Any | None = None
 
     async def connect(self) -> None:
         try:
@@ -159,6 +188,9 @@ class TelethonGateway:
             await self._client.disconnect()
         except Exception as error:
             raise _mapped_error(error) from error
+        finally:
+            self._qr_login = None
+            self._password_required = False
 
     async def is_authorized(self) -> bool:
         try:
@@ -180,13 +212,7 @@ class TelethonGateway:
         password: str | None = None,
     ) -> None:
         if self._password_required:
-            if not password:
-                raise AuthenticationRequiredError("需要二步验证密码")
-            try:
-                await self._client.sign_in(password=password)
-            except Exception as password_error:
-                raise _mapped_error(password_error) from password_error
-            self._password_required = False
+            await self.complete_password(password or "")
             return
         try:
             await self._client.sign_in(phone=phone, code=code)
@@ -194,13 +220,63 @@ class TelethonGateway:
             self._password_required = True
             if not password:
                 raise AuthenticationRequiredError("需要二步验证密码") from error
-            try:
-                await self._client.sign_in(password=password)
-            except Exception as password_error:
-                raise _mapped_error(password_error) from password_error
-            self._password_required = False
+            await self.complete_password(password)
         except Exception as error:
             raise _mapped_error(error) from error
+
+    async def start_qr_login(self) -> QrLoginChallenge:
+        try:
+            self._qr_login = await self._client.qr_login()
+            return self._qr_challenge()
+        except Exception as error:
+            raise _mapped_error(error) from error
+
+    async def refresh_qr_login(self) -> QrLoginChallenge:
+        if self._qr_login is None:
+            raise ValueError("请先开始二维码登录")
+        try:
+            await self._qr_login.recreate()
+            return self._qr_challenge()
+        except Exception as error:
+            raise _mapped_error(error) from error
+
+    async def wait_qr_login(self) -> None:
+        if self._qr_login is None:
+            raise ValueError("请先开始二维码登录")
+        try:
+            await self._qr_login.wait()
+        except TimeoutError as error:
+            raise QrLoginExpiredError("二维码已过期") from error
+        except errors.SessionPasswordNeededError as error:
+            self._password_required = True
+            raise AuthenticationRequiredError("需要二步验证密码") from error
+        except Exception as error:
+            raise _mapped_error(error) from error
+
+    async def complete_password(self, password: str) -> None:
+        if not password:
+            raise AuthenticationRequiredError("需要二步验证密码")
+        try:
+            await self._client.sign_in(password=password)
+        except Exception as error:
+            raise _mapped_error(error) from error
+        self._password_required = False
+
+    async def log_out(self) -> None:
+        try:
+            await self._client.log_out()
+        except Exception as error:
+            raise _mapped_error(error) from error
+        self._qr_login = None
+        self._password_required = False
+
+    def _qr_challenge(self) -> QrLoginChallenge:
+        if self._qr_login is None:
+            raise ValueError("请先开始二维码登录")
+        return QrLoginChallenge(
+            url=str(self._qr_login.url),
+            expires_at=self._qr_login.expires,
+        )
 
     async def list_groups(self) -> tuple[GroupTarget, ...]:
         groups: list[GroupTarget] = []
@@ -287,7 +363,17 @@ class TelethonGateway:
             raise _mapped_error(error) from error
 
 
-def _mapped_error(error: Exception) -> RuntimeError:
+def _mapped_error(error: Exception) -> Exception:
+    if isinstance(error, errors.ApiIdInvalidError):
+        return InvalidApiCredentialsError("API ID 或 API Hash 无效")
+    if isinstance(error, errors.PasswordHashInvalidError):
+        return AuthenticationRequiredError("二步验证密码错误")
+    if isinstance(error, errors.FloodWaitError):
+        seconds = int(getattr(error, "seconds", 0))
+        return TransientTelegramError(
+            f"Telegram 要求等待 {seconds} 秒",
+            retry_after=seconds,
+        )
     if isinstance(
         error,
         (
@@ -310,9 +396,6 @@ def _mapped_error(error: Exception) -> RuntimeError:
         return GroupAccessError("无法访问该群组")
     if isinstance(error, errors.MessageIdInvalidError):
         return PermanentMessageError("消息不存在、已删除或不可下载")
-    if isinstance(error, errors.FloodWaitError):
-        seconds = int(getattr(error, "seconds", 0))
-        return TransientTelegramError(f"Telegram 要求等待 {seconds} 秒")
     if isinstance(
         error,
         (

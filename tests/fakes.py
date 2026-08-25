@@ -36,6 +36,21 @@ class FakeTelegramGateway:
     ) -> None:
         self.authorized = True
 
+    async def start_qr_login(self):
+        raise RuntimeError("fake QR login is not configured")
+
+    async def refresh_qr_login(self):
+        raise RuntimeError("fake QR login is not configured")
+
+    async def wait_qr_login(self) -> None:
+        return None
+
+    async def complete_password(self, password: str) -> None:
+        self.authorized = True
+
+    async def log_out(self) -> None:
+        self.authorized = False
+
     async def list_groups(self) -> tuple[GroupTarget, ...]:
         return tuple(
             GroupTarget(chat_id, f"群 {chat_id}")
