@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
+from threading import Event, RLock
 from typing import Any
 
 
@@ -117,3 +119,145 @@ def create_status_icon(color: tuple[int, int, int, int]) -> Any:
     draw.rounded_rectangle((29, 13, 35, 38), radius=2, fill=(255, 255, 255, 255))
     draw.polygon(((20, 34), (44, 34), (32, 50)), fill=(255, 255, 255, 255))
     return image
+
+
+@dataclass(frozen=True)
+class TrayActions:
+    show_window: Callable[[], None]
+    start_service: Callable[[], None]
+    stop_service: Callable[[], None]
+    open_downloads: Callable[[], None]
+    open_logs: Callable[[], None]
+    exit_ui: Callable[[], None]
+    report_error: Callable[[Exception], None]
+
+
+class TrayController:
+    def __init__(
+        self,
+        *,
+        schedule: Callable[[Callable[[], None]], object],
+        actions: TrayActions,
+        icon_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self._schedule = schedule
+        self._actions = actions
+        self._icon_factory = icon_factory
+        self._icon: Any | None = None
+        self._presentation = build_tray_presentation({"status": "stopped"})
+        self._lock = RLock()
+        self._available = False
+        self._stopped = False
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    @property
+    def presentation(self) -> TrayPresentation:
+        with self._lock:
+            return self._presentation
+
+    def start(self) -> None:
+        if self._available:
+            return
+        import pystray
+
+        ready = Event()
+        menu = pystray.Menu(
+            pystray.MenuItem(
+                lambda _item: self.presentation.summary,
+                lambda _icon, _item: None,
+                enabled=False,
+            ),
+            pystray.MenuItem(
+                "打开配置器",
+                self._dispatch(self._actions.show_window),
+                default=True,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                "启动后台",
+                self._dispatch(self._actions.start_service),
+                enabled=lambda _item: self.presentation.can_start,
+            ),
+            pystray.MenuItem(
+                "停止后台",
+                self._dispatch(self._actions.stop_service),
+                enabled=lambda _item: self.presentation.can_stop,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("打开下载目录", self._dispatch(self._actions.open_downloads)),
+            pystray.MenuItem("打开日志目录", self._dispatch(self._actions.open_logs)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("退出托盘", self._dispatch(self._actions.exit_ui)),
+        )
+        factory = self._icon_factory or pystray.Icon
+        current = self.presentation
+        icon = factory(
+            "telegram-video-downloader",
+            icon=create_status_icon(current.color),
+            title=current.title,
+            menu=menu,
+        )
+
+        def setup(started_icon: Any) -> None:
+            started_icon.visible = True
+            ready.set()
+
+        try:
+            icon.run_detached(setup)
+            if not ready.wait(timeout=2):
+                raise RuntimeError("Windows 托盘图标启动超时")
+        except Exception:
+            icon.stop()
+            raise
+        self._icon = icon
+        self._stopped = False
+        self._available = True
+
+    def update(self, snapshot: object) -> None:
+        presentation = build_tray_presentation(snapshot)
+        with self._lock:
+            self._presentation = presentation
+        icon = self._icon
+        if icon is None or not self._available:
+            return
+        icon.icon = create_status_icon(presentation.color)
+        icon.title = presentation.title
+        icon.update_menu()
+
+    def notify_error(self, message: str) -> None:
+        icon = self._icon
+        if (
+            icon is not None
+            and self._available
+            and getattr(icon, "HAS_NOTIFICATION", False)
+        ):
+            icon.notify(_limited(message), "Telegram 视频自动下载器")
+
+    def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        self._available = False
+        icon, self._icon = self._icon, None
+        if icon is not None:
+            icon.stop()
+
+    def _dispatch(self, action: Callable[[], None]) -> Callable[[Any, Any], None]:
+        def callback(_icon: Any, _item: Any) -> None:
+            if self._stopped:
+                return
+            self._schedule(lambda: self._run_action(action))
+
+        return callback
+
+    def _run_action(self, action: Callable[[], None]) -> None:
+        if self._stopped:
+            return
+        try:
+            action()
+        except Exception as error:
+            self.notify_error(str(error) or type(error).__name__)
+            self._actions.report_error(error)
