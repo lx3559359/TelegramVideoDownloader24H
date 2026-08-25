@@ -116,7 +116,7 @@ class ScannerCoordinator:
 
     async def scan_once(self, chat_id: int, batch_size: int = 100) -> bool:
         group = self.state.get_group(chat_id)
-        if not group.enabled or group.history_complete:
+        if not group.enabled or not group.download_history or group.history_complete:
             return False
         if not self._can_access(chat_id):
             return False
@@ -162,7 +162,11 @@ class ScannerCoordinator:
         while not stop.is_set():
             worked = False
             for group in self.state.group_states():
-                if not group.enabled or group.history_complete:
+                if (
+                    not group.enabled
+                    or not group.download_history
+                    or group.history_complete
+                ):
                     continue
                 worked = await self.scan_once(group.chat_id) or worked
                 await asyncio.sleep(0)

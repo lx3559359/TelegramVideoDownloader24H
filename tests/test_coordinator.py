@@ -164,6 +164,47 @@ async def test_history_continues_below_saved_cursor(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_scan_pauses_and_resumes_from_saved_cursor(
+    tmp_path: Path,
+) -> None:
+    target = GroupTarget(-1001, "频道", False)
+    gateway = FakeTelegramGateway(
+        {-1001: [make_video(-1001, value) for value in (2, 3, 4)]}
+    )
+    store = StateStore(tmp_path / "state.sqlite3")
+    store.reconcile_targets((target,))
+    store.set_history_cursor(target.chat_id, 4, complete=False)
+    coordinator = ScannerCoordinator(store, gateway)
+    try:
+        assert await coordinator.scan_once(target.chat_id) is False
+        assert gateway.iterated_chat_ids == []
+        assert store.get_group(target.chat_id).history_cursor_id == 4
+
+        await coordinator.apply_targets((GroupTarget(-1001, "频道", True),))
+
+        assert await coordinator.scan_once(target.chat_id) is True
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_events_ignore_history_pause(tmp_path: Path) -> None:
+    target = GroupTarget(-1001, "频道", False)
+    gateway = FakeTelegramGateway()
+    store = StateStore(tmp_path / "state.sqlite3")
+    coordinator = ScannerCoordinator(store, gateway)
+    try:
+        await coordinator.start((target,))
+        await gateway.emit(make_video(-1001, 7))
+
+        job = store.claim_next()
+        assert job is not None
+        assert job.message_id == 7
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_removed_group_ignores_new_events(tmp_path: Path) -> None:
     selected = GroupTarget(-1001, "群")
     gateway = FakeTelegramGateway()
