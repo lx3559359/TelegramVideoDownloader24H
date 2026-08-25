@@ -14,9 +14,15 @@ from tg_video_downloader.update import (
     MODELSCOPE_URL,
     UpdateCheckError,
     UpdateManager,
+    UpdateRequest,
+    UpdateResult,
     UpdateSafetyError,
     filter_changes,
     parse_stable_tag,
+    consume_update_result,
+    read_update_request,
+    write_update_request,
+    write_update_result,
 )
 from tg_video_downloader.paths import ProjectPaths
 
@@ -289,3 +295,45 @@ def test_prepare_release_rejects_divergent_target(
 
     with pytest.raises(UpdateSafetyError, match="不是当前版本的快进更新"):
         manager.prepare_release(make_release(update_repository, "v0.3.0"))
+
+
+def test_update_request_round_trips_inside_runtime(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    request = UpdateRequest(
+        token="a" * 32,
+        tag="v0.2.0",
+        base_commit="1" * 40,
+        target_commit="2" * 40,
+        restore_service=True,
+    )
+
+    write_update_request(paths, request)
+
+    assert read_update_request(paths) == request
+    assert paths.update_request.resolve().is_relative_to(paths.root)
+    assert list(paths.runtime.glob(".update-request.json.*.tmp")) == []
+
+
+def test_update_state_rejects_invalid_tag_or_commit(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    paths.update_request.write_text('{"tag":"main"}', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        read_update_request(paths)
+
+
+def test_update_result_is_validated_and_consumed_once(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    result = UpdateResult(
+        token="b" * 32,
+        tag="v0.2.0",
+        status="success",
+        message="更新完成",
+        completed_at="2026-08-26T12:00:00+00:00",
+    )
+
+    write_update_result(paths, result)
+
+    assert consume_update_result(paths) == result
+    assert consume_update_result(paths) is None

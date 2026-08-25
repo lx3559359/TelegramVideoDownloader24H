@@ -46,6 +46,18 @@ class ProjectPaths:
     def writable_directories(self) -> tuple[Path, ...]:
         return self.runtime, self.cache, self.temp, self.logs, self.downloads
 
+    @property
+    def update_request(self) -> Path:
+        return self.runtime / "update-request.json"
+
+    @property
+    def update_result(self) -> Path:
+        return self.runtime / "update-result.json"
+
+    @property
+    def update_log(self) -> Path:
+        return self.logs / "update.log"
+
     def assert_within_root(self, path: Path) -> Path:
         resolved = path.resolve()
         if not resolved.is_relative_to(self.root):

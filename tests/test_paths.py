@@ -31,3 +31,14 @@ def test_gui_control_files_stay_inside_runtime(tmp_path: Path) -> None:
     assert paths.gui_activation == paths.runtime / "gui-activate.request"
     assert paths.gui_lock.is_relative_to(paths.root)
     assert paths.gui_activation.is_relative_to(paths.root)
+
+
+def test_update_control_files_stay_inside_project(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+
+    assert paths.update_request == paths.runtime / "update-request.json"
+    assert paths.update_result == paths.runtime / "update-result.json"
+    assert paths.update_log == paths.logs / "update.log"
+    assert paths.update_request.is_relative_to(paths.root)
+    assert paths.update_result.is_relative_to(paths.root)
+    assert paths.update_log.is_relative_to(paths.root)

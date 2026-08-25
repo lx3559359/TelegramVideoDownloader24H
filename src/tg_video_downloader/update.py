@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
+from typing import Literal
+from uuid import uuid4
 
 from tg_video_downloader.paths import ProjectPaths
 
@@ -15,6 +20,8 @@ MODELSCOPE_URL = (
     "https://www.modelscope.cn/studios/lx3559359/TelegramVideoDownloader24H.git"
 )
 STABLE_TAG = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+UPDATE_TOKEN = re.compile(r"^[0-9a-f]{32}$")
+COMMIT_ID = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True, order=True)
@@ -45,6 +52,24 @@ class PreparedRelease:
     base_commit: str
     target_commit: str
     changes: tuple[ChangedFile, ...]
+
+
+@dataclass(frozen=True)
+class UpdateRequest:
+    token: str
+    tag: str
+    base_commit: str
+    target_commit: str
+    restore_service: bool
+
+
+@dataclass(frozen=True)
+class UpdateResult:
+    token: str
+    tag: str
+    status: Literal["success", "rolled_back", "failed"]
+    message: str
+    completed_at: str
 
 
 CommandRunner = Callable[..., str]
@@ -112,6 +137,91 @@ def filter_changes(
     if not needle:
         return changes
     return tuple(item for item in changes if needle in item.path.casefold())
+
+
+def _validate_request(request: UpdateRequest) -> UpdateRequest:
+    if not isinstance(request.token, str) or UPDATE_TOKEN.fullmatch(request.token) is None:
+        raise ValueError("更新令牌格式无效")
+    if not isinstance(request.tag, str):
+        raise ValueError("更新标签格式无效")
+    parse_stable_tag(request.tag)
+    if (
+        not isinstance(request.base_commit, str)
+        or COMMIT_ID.fullmatch(request.base_commit) is None
+    ):
+        raise ValueError("基础提交格式无效")
+    if (
+        not isinstance(request.target_commit, str)
+        or COMMIT_ID.fullmatch(request.target_commit) is None
+    ):
+        raise ValueError("目标提交格式无效")
+    if not isinstance(request.restore_service, bool):
+        raise ValueError("服务恢复状态格式无效")
+    return request
+
+
+def _validate_result(result: UpdateResult) -> UpdateResult:
+    if not isinstance(result.token, str) or UPDATE_TOKEN.fullmatch(result.token) is None:
+        raise ValueError("更新结果令牌格式无效")
+    if not isinstance(result.tag, str):
+        raise ValueError("更新结果标签格式无效")
+    parse_stable_tag(result.tag)
+    if result.status not in {"success", "rolled_back", "failed"}:
+        raise ValueError("更新结果状态无效")
+    if not isinstance(result.completed_at, str):
+        raise ValueError("更新完成时间格式无效")
+    datetime.fromisoformat(result.completed_at)
+    if not isinstance(result.message, str) or len(result.message) > 500:
+        raise ValueError("更新结果摘要无效")
+    return result
+
+
+def _write_atomic_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_update_request(paths: ProjectPaths, request: UpdateRequest) -> None:
+    checked = _validate_request(request)
+    _write_atomic_json(paths.update_request, asdict(checked))
+
+
+def read_update_request(paths: ProjectPaths) -> UpdateRequest:
+    raw = json.loads(paths.update_request.read_text(encoding="utf-8"))
+    expected = {"token", "tag", "base_commit", "target_commit", "restore_service"}
+    if not isinstance(raw, dict) or set(raw) != expected:
+        raise ValueError("更新请求字段无效")
+    return _validate_request(UpdateRequest(**raw))
+
+
+def write_update_result(paths: ProjectPaths, result: UpdateResult) -> None:
+    checked = _validate_result(result)
+    _write_atomic_json(paths.update_result, asdict(checked))
+
+
+def read_update_result(paths: ProjectPaths) -> UpdateResult:
+    raw = json.loads(paths.update_result.read_text(encoding="utf-8"))
+    expected = {"token", "tag", "status", "message", "completed_at"}
+    if not isinstance(raw, dict) or set(raw) != expected:
+        raise ValueError("更新结果字段无效")
+    return _validate_result(UpdateResult(**raw))
+
+
+def consume_update_result(paths: ProjectPaths) -> UpdateResult | None:
+    if not paths.update_result.is_file():
+        return None
+    result = read_update_result(paths)
+    paths.update_result.unlink()
+    return result
 
 
 class UpdateManager:
