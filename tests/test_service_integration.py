@@ -1,14 +1,24 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from tg_video_downloader.config import ConfigStore
 from tg_video_downloader.coordinator import ScannerCoordinator
-from tg_video_downloader.gateway import TransientTelegramError
-from tg_video_downloader.models import GroupTarget, MessageInfo
+from tg_video_downloader.gateway import DOWNLOAD_CHUNK_SIZE, TransientTelegramError
+from tg_video_downloader.models import (
+    AppConfig,
+    Credentials,
+    GroupTarget,
+    JobSource,
+    MessageInfo,
+)
 from tg_video_downloader.naming import build_final_path
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.service import DownloaderService
 from tg_video_downloader.state import StateStore
+from tg_video_downloader.windows import request_stop
 from tg_video_downloader.worker import DownloadWorker
 from tests.fakes import FakeTelegramGateway
 
@@ -220,6 +230,137 @@ async def test_reenabled_group_catches_up_only_the_missed_video(tmp_path: Path) 
         state.close()
 
 
+@pytest.mark.asyncio
+async def test_service_hot_reload_resumes_paused_history_after_live_download(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    paused_target = GroupTarget(GROUP_A.chat_id, GROUP_A.title, False)
+    history = video(GROUP_A.chat_id, 1)
+    live = video(GROUP_A.chat_id, 2)
+    config_store = ConfigStore(paths)
+    config_store.save_credentials(Credentials(12345, "hash"))
+    config_store.save_config(
+        AppConfig(groups=(paused_target,), config_poll_seconds=1)
+    )
+    state = StateStore(paths.database)
+    state.reconcile_targets((paused_target,))
+    state.upsert_job(history, GROUP_A.title, JobSource.HISTORY)
+    state.upsert_job(live, GROUP_A.title, JobSource.LIVE)
+    state.close()
+    live_completed = asyncio.Event()
+    history_completed = asyncio.Event()
+
+    class RecordingGateway(FakeTelegramGateway):
+        async def download_message(self, chat_id, message_id, destination, **kwargs):
+            result = await super().download_message(
+                chat_id,
+                message_id,
+                destination,
+                **kwargs,
+            )
+            if message_id == live.message_id:
+                live_completed.set()
+            if message_id == history.message_id:
+                history_completed.set()
+            return result
+
+    gateway = RecordingGateway()
+    gateway.download_payloads[(live.chat_id, live.message_id)] = b"video--1001-2"
+    gateway.download_payloads[(history.chat_id, history.message_id)] = b"video--1001-1"
+    service_task = asyncio.create_task(
+        DownloaderService(paths, lambda *_: gateway).run()
+    )
+    try:
+        await asyncio.wait_for(live_completed.wait(), timeout=2)
+        live_final_path = build_final_path(paths, GROUP_A.title, live)
+        await _wait_until(live_final_path.is_file, timeout=2)
+        observer = StateStore(paths.database)
+        try:
+            assert observer.counts()["paused_history"] == 1
+        finally:
+            observer.close()
+        assert live_final_path.is_file()
+
+        config_store.save_config(
+            AppConfig(
+                groups=(GroupTarget(GROUP_A.chat_id, GROUP_A.title, True),),
+                config_poll_seconds=1,
+            )
+        )
+
+        await asyncio.wait_for(history_completed.wait(), timeout=2)
+        history_final_path = build_final_path(paths, GROUP_A.title, history)
+        await _wait_until(history_final_path.is_file, timeout=2)
+        assert history_final_path.is_file()
+    finally:
+        request_stop(paths)
+        assert await asyncio.wait_for(service_task, timeout=2) == 0
+
+
+@pytest.mark.asyncio
+async def test_service_stop_cancels_active_download_and_preserves_partial(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    target = GroupTarget(GROUP_A.chat_id, GROUP_A.title, True)
+    message = video(
+        GROUP_A.chat_id,
+        1,
+        payload=b"a" * (DOWNLOAD_CHUNK_SIZE * 2),
+    )
+    config_store = ConfigStore(paths)
+    config_store.save_credentials(Credentials(12345, "hash"))
+    config_store.save_config(AppConfig(groups=(target,), config_poll_seconds=1))
+    state = StateStore(paths.database)
+    state.reconcile_targets((target,))
+    state.upsert_job(message, GROUP_A.title, JobSource.LIVE)
+    state.close()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingGateway(FakeTelegramGateway):
+        async def download_message(
+            self,
+            _chat_id,
+            _message_id,
+            destination,
+            *,
+            offset=0,
+            progress_callback=None,
+        ):
+            with destination.open("ab" if offset else "wb") as handle:
+                handle.write(b"a" * DOWNLOAD_CHUNK_SIZE)
+            if progress_callback is not None:
+                progress_callback(offset + DOWNLOAD_CHUNK_SIZE, message.size)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    gateway = BlockingGateway()
+    service_task = asyncio.create_task(
+        DownloaderService(paths, lambda *_: gateway).run()
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    request_stop(paths)
+
+    assert await asyncio.wait_for(service_task, timeout=2) == 0
+    assert cancelled.is_set()
+    part_path = paths.temp / f"{message.chat_id}_{message.message_id}.part"
+    assert part_path.exists()
+    assert part_path.stat().st_size == DOWNLOAD_CHUNK_SIZE
+    reopened = StateStore(paths.database)
+    try:
+        assert reopened.claim_next() is not None
+    finally:
+        reopened.close()
+
+
 def test_all_generated_paths_stay_inside_project_root(tmp_path: Path) -> None:
     paths = ProjectPaths.from_root(tmp_path)
     paths.ensure_directories()
@@ -230,3 +371,11 @@ def test_all_generated_paths_stay_inside_project_root(tmp_path: Path) -> None:
         assert path.resolve().is_relative_to(paths.root)
     for path in paths.writable_directories:
         assert path.resolve().is_relative_to(paths.root)
+
+
+async def _wait_until(predicate, timeout: float) -> None:
+    async def wait() -> None:
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait(), timeout=timeout)
