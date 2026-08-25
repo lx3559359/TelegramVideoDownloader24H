@@ -132,16 +132,19 @@ def test_saved_session_probe_error_keeps_session_and_shows_generic_status() -> N
     assert app.account_status_var.get() == "暂时无法检查已有会话，可稍后重试"
 
 
-def test_start_service_sets_starting_status() -> None:
+def test_start_service_sets_and_publishes_starting_status() -> None:
     app = object.__new__(DownloaderApp)
     started: list[bool] = []
+    published: list[dict[str, object]] = []
     app.controller = SimpleNamespace(start=lambda: started.append(True))
     app.status_vars = {"status": FakeVar("stopped")}
+    app._status_listener = published.append
 
     app._start_service()
 
     assert started == [True]
     assert app.status_vars["status"].get() == "starting"
+    assert published == [{"status": "starting"}]
 
 
 def test_history_column_enables_target_and_history() -> None:
@@ -199,6 +202,8 @@ def test_format_progress_tolerates_missing_or_malformed_data(progress) -> None:
 def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False
+    published: list[dict[str, object]] = []
+    app._status_listener = published.append
     app.controller = SimpleNamespace(
         read_status=lambda: {
             "status": "running",
@@ -251,6 +256,71 @@ def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None
     assert app.status_vars["download_speed"].get() == "2.00 MiB/s"
     assert app.status_vars["paused_history"].get() == "3"
     assert app.group_status.value == "频道：监听新内容；历史下载已暂停"
+    assert published[0]["status"] == "running"
+
+
+def test_status_read_error_is_published_for_tray_recovery() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app.controller = SimpleNamespace(
+        read_status=lambda: (_ for _ in ()).throw(RuntimeError("heartbeat broken"))
+    )
+    app.status_vars = {"status": FakeVar()}
+    app.api_hash_var = FakeVar("")
+    app.phone_var = FakeVar("")
+    app.code_var = FakeVar("")
+    app.password_var = FakeVar("")
+    app.qr_password_var = FakeVar("")
+    published: list[dict[str, object]] = []
+    app._status_listener = published.append
+    app.after = lambda *_args: "after-status"
+
+    app._refresh_status()
+
+    assert published == [{"status": "error", "error": "heartbeat broken"}]
+
+
+def test_close_returns_immediately_after_first_cleanup() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = True
+
+    app.close()
+
+
+def test_status_listener_failure_does_not_corrupt_running_page() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app.controller = SimpleNamespace(
+        read_status=lambda: {"status": "running", "counts": {}, "groups": []}
+    )
+    app.status_vars = {
+        key: FakeVar()
+        for key in (
+            "status",
+            "updated_at",
+            "current_file",
+            "download_progress",
+            "download_speed",
+            "pending_live",
+            "pending_history",
+            "paused_history",
+            "completed",
+            "retry_wait",
+            "permanent_error",
+            "last_error",
+        )
+    }
+    app.group_status = FakeText()
+
+    def fail(_snapshot: dict[str, object]) -> None:
+        raise RuntimeError("tray update failed")
+
+    app._status_listener = fail
+    app.after = lambda *_args: "after-status"
+
+    app._refresh_status()
+
+    assert app.status_vars["status"].get() == "running"
 
 
 def test_expired_qr_refreshes_current_generation() -> None:

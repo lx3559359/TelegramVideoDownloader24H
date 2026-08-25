@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from collections.abc import Callable
 from concurrent.futures import CancelledError, Future
 from datetime import datetime
 from math import isfinite
@@ -92,6 +93,9 @@ class DownloaderApp(ttk.Frame):
         self.bridge = AsyncBridge()
         self._closed = False
         self._status_after: str | None = None
+        self._status_listener: Callable[[dict[str, object]], None] = (
+            lambda _snapshot: None
+        )
         self._groups: tuple[GroupTarget, ...] = ()
         saved = {group.chat_id: group for group in controller.selected_groups()}
         self._selected_ids = set(saved)
@@ -852,12 +856,26 @@ class DownloaderApp(ttk.Frame):
             return
         messagebox.showinfo("已保存", f"已保存 {len(groups)} 个群组/频道")
 
+    def set_status_listener(
+        self,
+        listener: Callable[[dict[str, object]], None],
+    ) -> None:
+        self._status_listener = listener
+
+    def _publish_status(self, snapshot: dict[str, object]) -> None:
+        try:
+            self._status_listener(snapshot)
+        except Exception:
+            pass
+
     def _start_service(self) -> None:
         self.controller.start()
+        snapshot: dict[str, object] = {"status": "starting"}
         self.status_vars["status"].set("starting")
+        self._publish_status(snapshot)
 
     def _stop_service(self) -> None:
-        self._call_sync(self.controller.stop)
+        self.controller.stop()
 
     def _run_doctor(self) -> None:
         def finished(result: tuple[DiagnosticReport, Path]) -> None:
@@ -945,8 +963,11 @@ class DownloaderApp(ttk.Frame):
             self.group_status.delete("1.0", "end")
             self.group_status.insert("1.0", "\n".join(lines) or "暂无群组/频道状态")
             self.group_status.configure(state="disabled")
+            self._publish_status(snapshot)
         except Exception as error:
-            self.status_vars["status"].set(f"状态读取失败：{self._safe_error(error)}")
+            message = self._safe_error(error)
+            self.status_vars["status"].set(f"状态读取失败：{message}")
+            self._publish_status({"status": "error", "error": message})
         self._status_after = self.after(2000, self._refresh_status)
 
     def _show_error(self, error: Exception) -> None:
@@ -966,6 +987,8 @@ class DownloaderApp(ttk.Frame):
         return message
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
         self._qr_generation += 1
         self._cancel_qr_callbacks()
