@@ -99,6 +99,17 @@ async def test_login_flow_and_group_listing(tmp_path: Path) -> None:
     assert not hasattr(controller, "password")
 
 
+@pytest.mark.asyncio
+async def test_phone_login_still_requires_phone(tmp_path: Path) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+
+    with pytest.raises(ValueError, match="手机号"):
+        await controller.send_code(Credentials(12345, "secret-hash"))
+
+    assert gateway.connected is False
+    assert gateway.sent_phone is None
+
+
 def test_start_stop_and_missing_heartbeat(tmp_path: Path) -> None:
     controller, paths, _, process = make_controller(tmp_path)
     controller.save_credentials(Credentials(12345, "hash", "+8613800000000"))

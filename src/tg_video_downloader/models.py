@@ -43,12 +43,21 @@ class AppConfig:
 class Credentials:
     api_id: int
     api_hash: str
-    phone: str
+    phone: str = ""
+
+    def validate_api(self) -> "Credentials":
+        if self.api_id <= 0 or not self.api_hash.strip():
+            raise ValueError("API ID 和 API Hash 均不能为空")
+        return self
+
+    def validate_phone_login(self) -> "Credentials":
+        self.validate_api()
+        if not self.phone.strip():
+            raise ValueError("手机号不能为空")
+        return self
 
     def validate(self) -> "Credentials":
-        if self.api_id <= 0 or not self.api_hash.strip() or not self.phone.strip():
-            raise ValueError("API ID、API Hash 和手机号均不能为空")
-        return self
+        return self.validate_api()
 
 
 @dataclass(frozen=True)

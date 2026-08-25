@@ -81,12 +81,12 @@ class ConfigStore:
         credentials = Credentials(
             api_id=int(data["api_id"]),
             api_hash=str(data["api_hash"]),
-            phone=str(data["phone"]),
+            phone=str(data.get("phone", "")),
         )
-        return credentials.validate()
+        return credentials.validate_api()
 
     def save_credentials(self, credentials: Credentials) -> None:
-        credentials.validate()
+        credentials.validate_api()
         content = "\n".join(
             [
                 f"api_id = {credentials.api_id}",

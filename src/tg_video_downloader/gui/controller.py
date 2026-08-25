@@ -110,10 +110,10 @@ class GuiController:
             return None
 
     def save_credentials(self, credentials: Credentials) -> None:
-        self.config_store.save_credentials(credentials.validate())
+        self.config_store.save_credentials(credentials.validate_api())
 
     async def send_code(self, credentials: Credentials) -> None:
-        credentials.validate()
+        credentials.validate_phone_login()
         self.save_credentials(credentials)
         if self._login_gateway is not None:
             await self._login_gateway.disconnect()
