@@ -271,7 +271,11 @@ class GuiController:
         self.process_control.request_stop(self.paths)
 
     async def run_doctor(self) -> tuple[DiagnosticReport, Path]:
-        doctor = Doctor(self.paths, self.gateway_factory)
+        doctor = Doctor(
+            self.paths,
+            self.gateway_factory,
+            login_active=lambda: self.login_active,
+        )
         report = await doctor.run()
         return report, doctor.save(report)
 

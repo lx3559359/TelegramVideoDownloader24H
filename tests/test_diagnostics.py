@@ -45,6 +45,8 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
         "project_paths",
         "python",
         "dependencies",
+        "qr_code",
+        "login_task",
         "config",
         "credentials",
         "disk",
@@ -59,6 +61,8 @@ async def test_doctor_runs_local_and_online_checks_and_saves_inside_project(
     assert json.loads(serialized)["exit_code"] == 0
     assert group.title not in serialized
     assert str(group.chat_id) not in serialized
+    assert "doctor-probe" not in serialized
+    assert "tg://login" not in serialized
     assert not saved.with_suffix(saved.suffix + ".tmp").exists()
     assert gateway.connected is False
 
@@ -121,7 +125,48 @@ async def test_project_path_failure_is_reported_without_aborting_other_checks(
 
     assert checks["project_paths"].status == "fail"
     assert checks["telegram"].status == "pass"
-    assert len(report.checks) == 9
+    assert len(report.checks) == 11
+
+
+@pytest.mark.asyncio
+async def test_doctor_accepts_empty_phone_and_checks_qr_component(
+    tmp_path: Path,
+) -> None:
+    paths, _, group = configure_valid_project(tmp_path)
+    ConfigStore(paths).save_credentials(Credentials(12345, "secret-hash"))
+    doctor = Doctor(
+        paths,
+        gateway_factory=lambda *_: FakeTelegramGateway({group.chat_id: []}),
+        login_active=lambda: False,
+    )
+
+    report = await doctor.run()
+    checks = {item.key: item for item in report.checks}
+
+    assert checks["credentials"].status == "pass"
+    assert checks["qr_code"].status == "pass"
+    assert checks["qr_code"].message == "二维码组件可用且无需图片文件"
+    assert checks["login_task"].status == "pass"
+    assert checks["login_task"].message == "没有未清理的登录任务"
+
+
+@pytest.mark.asyncio
+async def test_doctor_warns_when_login_is_active_without_redaction_corruption(
+    tmp_path: Path,
+) -> None:
+    paths, _, group = configure_valid_project(tmp_path)
+    ConfigStore(paths).save_credentials(Credentials(12345, "secret-hash"))
+    doctor = Doctor(
+        paths,
+        gateway_factory=lambda *_: FakeTelegramGateway({group.chat_id: []}),
+        login_active=lambda: True,
+    )
+
+    report = await doctor.run()
+    login_task = next(item for item in report.checks if item.key == "login_task")
+
+    assert login_task.status == "warning"
+    assert login_task.message == "图形界面存在进行中的登录任务"
 
 
 @pytest.mark.asyncio

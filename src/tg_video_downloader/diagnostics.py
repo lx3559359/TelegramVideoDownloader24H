@@ -19,6 +19,7 @@ from tg_video_downloader.gateway import (
     TelegramGateway,
     TransientTelegramError,
 )
+from tg_video_downloader.gui.qr_view import make_qr_matrix
 from tg_video_downloader.models import AppConfig, Credentials
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
@@ -66,9 +67,16 @@ class DiagnosticReport:
 
 
 class Doctor:
-    def __init__(self, paths: ProjectPaths, gateway_factory: GatewayFactory) -> None:
+    def __init__(
+        self,
+        paths: ProjectPaths,
+        gateway_factory: GatewayFactory,
+        *,
+        login_active: Callable[[], bool] | None = None,
+    ) -> None:
         self.paths = paths
         self.gateway_factory = gateway_factory
+        self.login_active = login_active
         self._secrets: tuple[str, ...] = ()
 
     async def run(self) -> DiagnosticReport:
@@ -77,6 +85,8 @@ class Doctor:
             self._run_local("project_paths", self._check_project_paths),
             self._run_local("python", self._check_python),
             self._run_local("dependencies", self._check_dependencies),
+            self._run_local("qr_code", self._check_qr_code),
+            self._run_local("login_task", self._check_login_task),
         ]
 
         config, config_check = self._load_config(config_store)
@@ -84,7 +94,9 @@ class Doctor:
         credentials, credentials_check = self._load_credentials(config_store)
         checks.append(credentials_check)
         if credentials is not None:
-            self._secrets = (credentials.api_hash, credentials.phone)
+            self._secrets = tuple(
+                value for value in (credentials.api_hash, credentials.phone) if value
+            )
 
         checks.extend(
             (
@@ -176,12 +188,27 @@ class Doctor:
 
     def _check_dependencies(self) -> DiagnosticCheck:
         installed: list[str] = []
-        for distribution in ("telethon", "tzdata"):
+        for distribution in ("telethon", "tzdata", "qrcode"):
             try:
                 installed.append(f"{distribution} {version(distribution)}")
             except PackageNotFoundError as error:
                 raise RuntimeError(f"缺少依赖 {distribution}") from error
         return DiagnosticCheck("dependencies", "pass", "，".join(installed))
+
+    def _check_qr_code(self) -> DiagnosticCheck:
+        matrix = make_qr_matrix("tg://login?token=doctor-probe")
+        if not matrix or len(matrix) != len(matrix[0]):
+            return DiagnosticCheck("qr_code", "fail", "二维码矩阵生成失败")
+        return DiagnosticCheck("qr_code", "pass", "二维码组件可用且无需图片文件")
+
+    def _check_login_task(self) -> DiagnosticCheck:
+        if self.login_active is not None and self.login_active():
+            return DiagnosticCheck(
+                "login_task",
+                "warning",
+                "图形界面存在进行中的登录任务",
+            )
+        return DiagnosticCheck("login_task", "pass", "没有未清理的登录任务")
 
     def _load_config(
         self,

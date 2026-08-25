@@ -237,8 +237,9 @@ async def test_run_doctor_returns_report_and_project_local_path(
     )
 
     class FakeDoctor:
-        def __init__(self, doctor_paths, gateway_factory) -> None:
+        def __init__(self, doctor_paths, gateway_factory, *, login_active) -> None:
             assert doctor_paths is paths
+            assert login_active() is False
 
         async def run(self) -> DiagnosticReport:
             return report
