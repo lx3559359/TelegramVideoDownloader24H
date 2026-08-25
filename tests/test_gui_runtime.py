@@ -78,9 +78,21 @@ class FakeApp:
         self.controller = controller
         self.closed = 0
         self.listener = lambda _snapshot: None
+        self.update_page_calls = 0
+        self.update_check_calls = 0
+        self.update_exit = lambda: None
 
     def set_status_listener(self, listener) -> None:
         self.listener = listener
+
+    def show_update_page(self) -> None:
+        self.update_page_calls += 1
+
+    def _check_for_update(self) -> None:
+        self.update_check_calls += 1
+
+    def set_update_exit(self, callback) -> None:
+        self.update_exit = callback
 
     def _start_service(self) -> None:
         self.controller.start()
@@ -276,6 +288,11 @@ def test_tray_actions_route_to_existing_controller_methods(tmp_path: Path) -> No
     )
     captured = {}
 
+    def app_factory(created_root, created_controller):
+        app = FakeApp(created_root, created_controller)
+        captured["app"] = app
+        return app
+
     def tray_factory(**kwargs):
         tray = FakeTray(**kwargs)
         captured["tray"] = tray
@@ -287,6 +304,7 @@ def test_tray_actions_route_to_existing_controller_methods(tmp_path: Path) -> No
         actions.stop_service()
         actions.open_downloads()
         actions.open_logs()
+        actions.check_update()
         actions.exit_ui()
 
     root.mainloop_action = mainloop_action
@@ -294,9 +312,54 @@ def test_tray_actions_route_to_existing_controller_methods(tmp_path: Path) -> No
         ProjectPaths.from_root(tmp_path),
         root_factory=lambda: root,
         controller_factory=lambda _paths: controller,
-        app_factory=FakeApp,
+        app_factory=app_factory,
         tray_factory=tray_factory,
         instance_factory=lambda _paths: instance,
     )
 
     assert calls == ["start", "stop", "downloads", "logs"]
+    assert captured["app"].update_page_calls == 1
+    assert captured["app"].update_check_calls == 1
+
+
+def test_tray_update_action_restores_window_and_starts_manual_check(
+    tmp_path: Path,
+) -> None:
+    root = FakeRoot()
+    instance = FakeInstance()
+    captured = {}
+    controller = SimpleNamespace(
+        start=lambda: None,
+        stop=lambda: None,
+        open_downloads=lambda: None,
+        open_logs=lambda: None,
+        read_status=lambda: {"status": "stopped"},
+    )
+
+    def app_factory(created_root, created_controller):
+        app = FakeApp(created_root, created_controller)
+        captured["app"] = app
+        return app
+
+    def tray_factory(**kwargs):
+        tray = FakeTray(**kwargs)
+        captured["tray"] = tray
+        return tray
+
+    def mainloop_action() -> None:
+        captured["tray"].actions.check_update()
+        captured["tray"].actions.exit_ui()
+
+    root.mainloop_action = mainloop_action
+    run_gui(
+        ProjectPaths.from_root(tmp_path),
+        root_factory=lambda: root,
+        controller_factory=lambda _paths: controller,
+        app_factory=app_factory,
+        tray_factory=tray_factory,
+        instance_factory=lambda _paths: instance,
+    )
+
+    assert root.show_calls == ["deiconify", "lift", "focus"]
+    assert captured["app"].update_page_calls == 1
+    assert captured["app"].update_check_calls == 1

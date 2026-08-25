@@ -12,6 +12,7 @@ from tg_video_downloader.gui.controller import GuiController
 from tg_video_downloader.models import Credentials, GroupTarget
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.update import UpdateResult, write_update_result
 
 
 class LoginGateway:
@@ -246,6 +247,21 @@ async def test_prepare_update_rejects_active_login_before_service_control(
         await controller.prepare_update_install(SimpleNamespace(tag="v0.2.0"))
 
     assert process.actions == []
+
+
+def test_update_result_is_consumed_only_once(tmp_path: Path) -> None:
+    controller, paths, _, _ = make_controller(tmp_path)
+    result = UpdateResult(
+        token="a" * 32,
+        tag="v0.2.0",
+        status="success",
+        message="更新完成",
+        completed_at="2026-08-26T12:00:00+00:00",
+    )
+    write_update_result(paths, result)
+
+    assert controller.consume_update_result() == result
+    assert controller.consume_update_result() is None
 
 
 @pytest.mark.asyncio

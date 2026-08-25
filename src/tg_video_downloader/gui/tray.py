@@ -128,6 +128,7 @@ class TrayActions:
     stop_service: Callable[[], None]
     open_downloads: Callable[[], None]
     open_logs: Callable[[], None]
+    check_update: Callable[[], None]
     exit_ui: Callable[[], None]
     report_error: Callable[[Exception], None]
 
@@ -189,6 +190,7 @@ class TrayController:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("打开下载目录", self._dispatch(self._actions.open_downloads)),
             pystray.MenuItem("打开日志目录", self._dispatch(self._actions.open_logs)),
+            pystray.MenuItem("检查更新", self._dispatch(self._actions.check_update)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出托盘", self._dispatch(self._actions.exit_ui)),
         )

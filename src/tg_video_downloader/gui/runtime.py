@@ -54,6 +54,11 @@ def run_gui(
             show_window()
             messagebox.showerror("操作失败", app._safe_error(error), parent=root)
 
+        def check_update() -> None:
+            show_window()
+            app.show_update_page()
+            app._check_for_update()
+
         def quit_ui() -> None:
             nonlocal closing
             if closing:
@@ -69,12 +74,15 @@ def run_gui(
             app.close()
             root.destroy()
 
+        app.set_update_exit(quit_ui)
+
         actions = TrayActions(
             show_window=show_window,
             start_service=app._start_service,
             stop_service=app._stop_service,
             open_downloads=app.controller.open_downloads,
             open_logs=app.controller.open_logs,
+            check_update=check_update,
             exit_ui=quit_ui,
             report_error=report_error,
         )

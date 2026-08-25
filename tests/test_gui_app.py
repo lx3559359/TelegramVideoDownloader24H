@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +7,12 @@ import pytest
 from tg_video_downloader.gateway import QrLoginExpiredError, TransientTelegramError
 from tg_video_downloader.gui import app as app_module
 from tg_video_downloader.gui.app import DownloaderApp
+from tg_video_downloader.update import (
+    AvailableRelease,
+    ChangedFile,
+    PreparedRelease,
+    parse_stable_tag,
+)
 
 
 class FakeFrame:
@@ -54,6 +61,20 @@ class FakeText:
 
     def insert(self, _index: str, value: str) -> None:
         self.value = value
+
+
+class FakeTree:
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, str]] = []
+
+    def get_children(self) -> tuple[str, ...]:
+        return tuple(str(index) for index in range(len(self.rows)))
+
+    def delete(self, *_items: str) -> None:
+        self.rows.clear()
+
+    def insert(self, _parent: str, _index: str, *, values) -> None:
+        self.rows.append(tuple(values))
 
 
 def test_phone_login_panel_toggles_without_tk_window() -> None:
@@ -268,6 +289,167 @@ def test_choose_download_root_saves_and_displays_normalized_path(
 
     assert saved == [selected]
     assert app.download_root_var.get() == str(selected)
+
+
+def prepared_release() -> PreparedRelease:
+    return PreparedRelease(
+        release=AvailableRelease(
+            parse_stable_tag("v0.2.0"),
+            "v0.2.0",
+            "GitHub",
+            "https://example.invalid/repo.git",
+        ),
+        base_commit="1" * 40,
+        target_commit="2" * 40,
+        changes=(
+            ChangedFile("M", "src/gui/app.py"),
+            ChangedFile("A", "README.md"),
+        ),
+    )
+
+
+def test_application_version_reads_package_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.app.version",
+        lambda _name: "0.2.0",
+    )
+
+    assert app_module.application_version() == "0.2.0"
+
+
+def test_show_prepared_release_enables_install_and_lists_changes() -> None:
+    app = object.__new__(DownloaderApp)
+    app.update_status_var = FakeVar()
+    app.update_search_var = FakeVar("")
+    app.update_install_button = FakeButton()
+    app.update_changes = FakeTree()
+    app._prepared_release = None
+    prepared = prepared_release()
+
+    app._show_prepared_release(prepared)
+
+    assert app._prepared_release is prepared
+    assert "v0.2.0" in app.update_status_var.get()
+    assert "GitHub" in app.update_status_var.get()
+    assert app.update_install_button.states == ["!disabled"]
+    assert app.update_changes.rows == [
+        ("M", "src/gui/app.py"),
+        ("A", "README.md"),
+    ]
+
+
+def test_no_update_clears_preview_and_disables_install() -> None:
+    app = object.__new__(DownloaderApp)
+    app.update_status_var = FakeVar()
+    app.update_search_var = FakeVar("")
+    app.update_install_button = FakeButton()
+    app.update_changes = FakeTree()
+    app.update_changes.rows.append(("M", "old.py"))
+    app._prepared_release = prepared_release()
+
+    app._show_prepared_release(None)
+
+    assert app._prepared_release is None
+    assert app.update_status_var.get() == "当前已是最新稳定版"
+    assert app.update_install_button.states == ["disabled"]
+    assert app.update_changes.rows == []
+
+
+def test_update_change_search_filters_only_the_preview() -> None:
+    app = object.__new__(DownloaderApp)
+    app.update_search_var = FakeVar("README")
+    app.update_changes = FakeTree()
+    app._prepared_release = prepared_release()
+
+    app._render_update_changes()
+
+    assert app.update_changes.rows == [("A", "README.md")]
+    assert len(app._prepared_release.changes) == 2
+
+
+def test_successful_install_preparation_requests_update_exit() -> None:
+    app = object.__new__(DownloaderApp)
+    exits: list[bool] = []
+    app.update_status_var = FakeVar()
+    app._request_update_exit = lambda: exits.append(True)
+
+    app._handle_update_install_success(None)
+
+    assert exits == [True]
+    assert "即将重启" in app.update_status_var.get()
+
+
+def test_failed_install_does_not_request_update_exit() -> None:
+    app = object.__new__(DownloaderApp)
+    exits: list[bool] = []
+    shown: list[str] = []
+    app.update_install_button = FakeButton()
+    app._request_update_exit = lambda: exits.append(True)
+    app._show_error = lambda error: shown.append(str(error))
+
+    app._handle_update_install_error(RuntimeError("dirty tree"))
+
+    assert exits == []
+    assert shown == ["dirty tree"]
+    assert app.update_install_button.states == ["!disabled"]
+
+
+def test_install_confirmation_explains_whole_release_and_service_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = object.__new__(DownloaderApp)
+    app._prepared_release = prepared_release()
+    app.update_install_button = FakeButton()
+    app.controller = SimpleNamespace(
+        prepare_update_install=lambda value: ("install", value)
+    )
+    prompts: list[str] = []
+    submitted: list[object] = []
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.app.messagebox.askyesno",
+        lambda _title, message, **_kwargs: prompts.append(message) or True,
+    )
+    app._run_async = (
+        lambda operation, _button, _success, _error=None: submitted.append(operation)
+    )
+
+    app._install_update()
+
+    assert "v0.2.0" in prompts[0]
+    assert "GitHub" in prompts[0]
+    assert "2 个文件" in prompts[0]
+    assert "完整版本" in prompts[0]
+    assert "停止后恢复" in prompts[0]
+    assert submitted == [("install", app._prepared_release)]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_async_update_operation_reenables_button_on_completion(fails: bool) -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    future: Future[object] = Future()
+    if fails:
+        future.set_exception(RuntimeError("check failed"))
+    else:
+        future.set_result("prepared")
+    app.bridge = SimpleNamespace(submit=lambda _operation: future)
+    app.after = lambda _delay, callback: callback()
+    button = FakeButton()
+    successes: list[object] = []
+    failures: list[str] = []
+
+    app._run_async(
+        object(),
+        button,
+        successes.append,
+        lambda error: failures.append(str(error)),
+    )
+
+    assert button.states == ["!disabled"]
+    assert successes == ([] if fails else ["prepared"])
+    assert failures == (["check failed"] if fails else [])
 
 
 def test_refresh_status_shows_progress_paused_history_and_group_policy() -> None:

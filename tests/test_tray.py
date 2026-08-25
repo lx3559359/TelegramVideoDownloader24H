@@ -144,6 +144,7 @@ def make_actions(calls: list[str], errors: list[Exception]) -> TrayActions:
         stop_service=lambda: calls.append("stop"),
         open_downloads=lambda: calls.append("downloads"),
         open_logs=lambda: calls.append("logs"),
+        check_update=lambda: calls.append("update"),
         exit_ui=lambda: calls.append("exit"),
         report_error=errors.append,
     )
@@ -178,6 +179,7 @@ def test_controller_starts_updates_and_stops_idempotently() -> None:
         ("stop_service", "stop"),
         ("open_downloads", "downloads"),
         ("open_logs", "logs"),
+        ("check_update", "update"),
         ("exit_ui", "exit"),
     ],
 )
@@ -200,6 +202,18 @@ def test_menu_callbacks_are_marshaled_to_tk(
     assert calls == []
     scheduled.pop()()
     assert calls == [expected]
+
+
+def test_menu_contains_manual_update_action() -> None:
+    controller = TrayController(
+        schedule=lambda _callback: None,
+        actions=make_actions([], []),
+        icon_factory=FakeIcon,
+    )
+
+    controller.start()
+
+    assert "检查更新" in str(FakeIcon.latest.menu)
 
 
 def test_action_failure_notifies_and_reports_without_stopping_tray() -> None:

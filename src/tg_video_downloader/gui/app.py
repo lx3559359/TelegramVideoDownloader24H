@@ -4,6 +4,7 @@ import tkinter as tk
 from collections.abc import Callable
 from concurrent.futures import CancelledError, Future
 from datetime import datetime
+from importlib.metadata import PackageNotFoundError, version
 from math import isfinite
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -23,6 +24,13 @@ from tg_video_downloader.gui.qr_view import (
     seconds_until_expiry,
 )
 from tg_video_downloader.models import Credentials, GroupTarget
+
+
+def application_version() -> str:
+    try:
+        return version("telegram-video-downloader")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _format_bytes(value: int | float) -> str:
@@ -139,11 +147,21 @@ class DownloaderApp(ttk.Frame):
         self._qr_countdown_after: str | None = None
         self._qr_expires_at: datetime | None = None
         self._qr_retry_attempt = 0
+        self._prepared_release: Any | None = None
+        self._request_update_exit: Callable[[], None] = lambda: None
 
         self.pack(fill="both", expand=True)
         self._build_account_page()
         self._build_groups_page()
         self._build_run_page()
+        update_result = self.controller.consume_update_result()
+        if update_result is not None:
+            title = (
+                "更新完成"
+                if update_result.status == "success"
+                else "更新未完成"
+            )
+            messagebox.showinfo(title, update_result.message, parent=self)
         saved_credentials = self._load_saved_credentials()
         if saved_credentials is not None:
             self._check_saved_session()
@@ -359,6 +377,7 @@ class DownloaderApp(ttk.Frame):
 
     def _build_run_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=18)
+        self.run_page = page
         self.notebook.add(page, text="运行")
         actions = ttk.Frame(page)
         actions.pack(fill="x", pady=(0, 16))
@@ -404,6 +423,67 @@ class DownloaderApp(ttk.Frame):
             text="打开目录",
             command=lambda: self._call_sync(self.controller.open_downloads),
         ).grid(row=0, column=3)
+
+        updates = ttk.LabelFrame(page, text="软件更新", padding=10)
+        updates.pack(fill="x", pady=(0, 16))
+        updates.columnconfigure(1, weight=1)
+        ttk.Label(updates, text="当前版本").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+        )
+        ttk.Label(updates, text=application_version()).grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+        self.update_check_button = ttk.Button(
+            updates,
+            text="检查更新",
+            command=self._check_for_update,
+        )
+        self.update_check_button.grid(row=0, column=2, padx=(8, 0))
+        self.update_install_button = ttk.Button(
+            updates,
+            text="安装完整更新",
+            command=self._install_update,
+        )
+        self.update_install_button.grid(row=0, column=3, padx=(8, 0))
+        self.update_install_button.state(["disabled"])
+        self.update_status_var = tk.StringVar(value="仅在手动检查时联网")
+        ttk.Label(updates, textvariable=self.update_status_var).grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(8, 6),
+        )
+        self.update_search_var = tk.StringVar()
+        self.update_search_var.trace_add(
+            "write",
+            lambda *_args: self._render_update_changes(),
+        )
+        ttk.Entry(
+            updates,
+            textvariable=self.update_search_var,
+        ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        self.update_changes = ttk.Treeview(
+            updates,
+            columns=("status", "path"),
+            show="headings",
+            height=4,
+        )
+        self.update_changes.heading("status", text="状态")
+        self.update_changes.heading("path", text="变更文件（搜索仅用于预览）")
+        self.update_changes.column(
+            "status",
+            width=60,
+            anchor="center",
+            stretch=False,
+        )
+        self.update_changes.column("path", width=620)
+        self.update_changes.grid(row=3, column=0, columnspan=4, sticky="ew")
 
         self.status_vars = {
             "status": tk.StringVar(value="stopped"),
@@ -475,6 +555,85 @@ class DownloaderApp(ttk.Frame):
             self.download_root_var.set(str(root))
 
         self._call_sync(save)
+
+    def show_update_page(self) -> None:
+        self.notebook.select(self.run_page)
+
+    def set_update_exit(self, callback: Callable[[], None]) -> None:
+        self._request_update_exit = callback
+
+    def _check_for_update(self) -> None:
+        self.update_status_var.set("正在检查稳定版本……")
+        self.update_install_button.state(["disabled"])
+        self._run_async(
+            self.controller.check_for_update(),
+            self.update_check_button,
+            self._show_prepared_release,
+            self._handle_update_check_error,
+        )
+
+    def _handle_update_check_error(self, error: Exception) -> None:
+        self.update_status_var.set("检查更新失败")
+        self._show_error(error)
+
+    def _show_prepared_release(self, prepared: Any | None) -> None:
+        self._prepared_release = prepared
+        if prepared is None:
+            self.update_status_var.set("当前已是最新稳定版")
+            self.update_install_button.state(["disabled"])
+        else:
+            self.update_status_var.set(
+                f"发现 {prepared.release.tag}｜来源：{prepared.release.source}｜"
+                f"变更 {len(prepared.changes)} 个文件"
+            )
+            self.update_install_button.state(["!disabled"])
+        self._render_update_changes()
+
+    def _render_update_changes(self) -> None:
+        self.update_changes.delete(*self.update_changes.get_children())
+        if self._prepared_release is None:
+            return
+        from tg_video_downloader.update import filter_changes
+
+        changes = filter_changes(
+            self._prepared_release.changes,
+            self.update_search_var.get(),
+        )
+        for change in changes:
+            self.update_changes.insert(
+                "",
+                "end",
+                values=(change.status, change.path),
+            )
+
+    def _install_update(self) -> None:
+        prepared = self._prepared_release
+        if prepared is None:
+            return
+        message = (
+            f"将安装 {prepared.release.tag}（{prepared.release.source}），"
+            f"共变更 {len(prepared.changes)} 个文件。\n\n"
+            "文件搜索只用于预览；安装始终应用完整版本。\n"
+            "如果后台正在运行，会先正常停止，完成或回滚后按原状态恢复。\n\n"
+            "确认继续？（运行中的后台将在停止后恢复）"
+        )
+        if not messagebox.askyesno("安装软件更新", message, parent=self):
+            return
+        self.update_install_button.state(["disabled"])
+        self._run_async(
+            self.controller.prepare_update_install(prepared),
+            self.update_install_button,
+            self._handle_update_install_success,
+            self._handle_update_install_error,
+        )
+
+    def _handle_update_install_success(self, _result: object) -> None:
+        self.update_status_var.set("更新器已启动，配置器即将重启")
+        self._request_update_exit()
+
+    def _handle_update_install_error(self, error: Exception) -> None:
+        self.update_install_button.state(["!disabled"])
+        self._show_error(error)
 
     def _load_saved_credentials(self) -> Credentials | None:
         credentials = self.controller.load_credentials()
@@ -983,13 +1142,19 @@ class DownloaderApp(ttk.Frame):
         except Exception as error:
             self._show_error(error)
 
-    def _run_async(self, coroutine, button: ttk.Button, on_success) -> None:
+    def _run_async(
+        self,
+        coroutine,
+        button: ttk.Button,
+        on_success,
+        on_error=None,
+    ) -> None:
         button.state(["disabled"])
         try:
             future = self.bridge.submit(coroutine)
         except Exception as error:
             button.state(["!disabled"])
-            self._show_error(error)
+            (on_error or self._show_error)(error)
             return
 
         def poll() -> None:
@@ -1002,7 +1167,7 @@ class DownloaderApp(ttk.Frame):
             try:
                 on_success(future.result())
             except Exception as error:
-                self._show_error(error)
+                (on_error or self._show_error)(error)
 
         self.after(100, poll)
 

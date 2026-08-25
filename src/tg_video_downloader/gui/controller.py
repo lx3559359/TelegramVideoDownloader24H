@@ -355,6 +355,13 @@ class GuiController:
                 self.process_control.start(self.paths.root)
             raise
 
+    def consume_update_result(self) -> UpdateResult | None:
+        if not self.paths.update_result.is_file():
+            return None
+        from tg_video_downloader.update import consume_update_result
+
+        return consume_update_result(self.paths)
+
     async def run_doctor(self) -> tuple[DiagnosticReport, Path]:
         doctor = Doctor(
             self.paths,
