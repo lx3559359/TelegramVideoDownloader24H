@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from tg_video_downloader.gateway import (
     AuthenticationRequiredError,
     InvalidApiCredentialsError,
     QrLoginExpiredError,
+    TelegramSessionInUseError,
     TelethonGateway,
     TransientTelegramError,
     _mapped_error,
@@ -18,6 +20,191 @@ from tg_video_downloader.gateway import (
 )
 from tg_video_downloader.models import Credentials, GroupTarget
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.windows import SingleInstance
+
+
+class LifecycleClient:
+    def __init__(
+        self,
+        *,
+        connect_error: Exception | None = None,
+        disconnect_error: Exception | None = None,
+    ) -> None:
+        self.connect_error = connect_error
+        self.disconnect_error = disconnect_error
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        if self.connect_error is not None:
+            raise self.connect_error
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
+
+
+@pytest.mark.asyncio
+async def test_gateway_defers_client_factory_until_connect(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    clients: list[LifecycleClient] = []
+
+    def factory(*_args: object, **_kwargs: object) -> LifecycleClient:
+        client = LifecycleClient()
+        clients.append(client)
+        return client
+
+    gateway = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+
+    assert clients == []
+    await gateway.connect()
+    assert len(clients) == 1
+    assert clients[0].connect_calls == 1
+    await gateway.disconnect()
+    assert clients[0].disconnect_calls == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows byte-lock behavior")
+@pytest.mark.asyncio
+async def test_gateway_holds_session_lock_while_factory_runs(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+
+    def factory(*_args: object, **_kwargs: object) -> LifecycleClient:
+        with pytest.raises(RuntimeError, match="factory observed lock"):
+            with SingleInstance(
+                paths.telegram_client_lock,
+                already_running_message="factory observed lock",
+            ):
+                raise AssertionError("factory must run after lock acquisition")
+        return LifecycleClient()
+
+    gateway = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+
+    await gateway.connect()
+    await gateway.disconnect()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows byte-lock behavior")
+@pytest.mark.asyncio
+async def test_second_gateway_fails_before_constructing_client(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    clients: list[LifecycleClient] = []
+
+    def factory(*_args: object, **_kwargs: object) -> LifecycleClient:
+        client = LifecycleClient()
+        clients.append(client)
+        return client
+
+    first = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+    second = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+    await first.connect()
+    try:
+        with pytest.raises(TelegramSessionInUseError, match="后台使用"):
+            await second.connect()
+        assert len(clients) == 1
+    finally:
+        await first.disconnect()
+
+    await second.connect()
+    assert len(clients) == 2
+    await second.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_gateway_connect_failure_releases_session_lock(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    clients = [
+        LifecycleClient(connect_error=ConnectionError("offline")),
+        LifecycleClient(),
+    ]
+
+    def factory(*_args: object, **_kwargs: object) -> LifecycleClient:
+        return clients.pop(0)
+
+    first = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+    second = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+
+    with pytest.raises(TransientTelegramError, match="offline"):
+        await first.connect()
+    await second.connect()
+    await second.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_gateway_disconnect_failure_releases_session_lock(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    clients = [
+        LifecycleClient(disconnect_error=ConnectionError("disconnect failed")),
+        LifecycleClient(),
+    ]
+
+    def factory(*_args: object, **_kwargs: object) -> LifecycleClient:
+        return clients.pop(0)
+
+    first = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+    second = TelethonGateway(
+        paths,
+        Credentials(12345, "hash"),
+        client_factory=factory,
+    )
+
+    await first.connect()
+    with pytest.raises(TransientTelegramError, match="disconnect failed"):
+        await first.disconnect()
+    await second.connect()
+    await second.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_gateway_connect_and_disconnect_are_idempotent(tmp_path: Path) -> None:
+    client = LifecycleClient()
+    gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path),
+        Credentials(12345, "hash"),
+        client_factory=lambda *_args, **_kwargs: client,
+    )
+
+    await gateway.connect()
+    await gateway.connect()
+    await gateway.disconnect()
+    await gateway.disconnect()
+
+    assert client.connect_calls == 1
+    assert client.disconnect_calls == 1
 
 
 def _attribute(name: str, **values):
@@ -108,8 +295,9 @@ def _search_message(
     )
 
 
-class SearchClient:
+class SearchClient(LifecycleClient):
     def __init__(self, messages) -> None:
+        super().__init__()
         self.messages = tuple(messages)
         self.options = {}
         self.yield_count = 0
@@ -171,7 +359,11 @@ async def test_search_videos_is_server_filtered_bounded_and_latest_first(
         client_factory=lambda *_args, **_kwargs: client,
     )
 
-    results = await gateway.search_videos(-1001, "课程", start, end, 20)
+    await gateway.connect()
+    try:
+        results = await gateway.search_videos(-1001, "课程", start, end, 20)
+    finally:
+        await gateway.disconnect()
 
     assert [item.message.message_id for item in results] == [9, 7]
     assert results[0].duration_seconds == 95
@@ -201,7 +393,11 @@ async def test_search_videos_stops_at_requested_result_limit(tmp_path: Path) -> 
         client_factory=lambda *_args, **_kwargs: client,
     )
 
-    results = await gateway.search_videos(-1001, "", None, None, 100)
+    await gateway.connect()
+    try:
+        results = await gateway.search_videos(-1001, "", None, None, 100)
+    finally:
+        await gateway.disconnect()
 
     assert len(results) == 100
     assert client.yield_count == 100
@@ -227,7 +423,11 @@ async def test_search_videos_caps_nonmatching_candidates_at_500(
         client_factory=lambda *_args, **_kwargs: client,
     )
 
-    results = await gateway.search_videos(-1001, "", None, None, 20)
+    await gateway.connect()
+    try:
+        results = await gateway.search_videos(-1001, "", None, None, 20)
+    finally:
+        await gateway.disconnect()
 
     assert results == ()
     assert client.yield_count == 500
@@ -266,7 +466,11 @@ async def test_search_videos_ignores_invalid_duration_metadata(tmp_path: Path) -
         client_factory=lambda *_args, **_kwargs: client,
     )
 
-    results = await gateway.search_videos(-1001, "", None, None, 20)
+    await gateway.connect()
+    try:
+        results = await gateway.search_videos(-1001, "", None, None, 20)
+    finally:
+        await gateway.disconnect()
 
     assert [item.duration_seconds for item in results] == [None, None]
 
@@ -275,7 +479,7 @@ async def test_search_videos_ignores_invalid_duration_metadata(tmp_path: Path) -
 async def test_search_videos_maps_client_errors(
     tmp_path: Path,
 ) -> None:
-    class FailingClient:
+    class FailingClient(LifecycleClient):
         async def iter_messages(self, *_args, **_kwargs):
             if False:
                 yield None
@@ -286,15 +490,19 @@ async def test_search_videos_maps_client_errors(
         Credentials(123, "hash"),
         client_factory=lambda *_args, **_kwargs: FailingClient(),
     )
-    with pytest.raises(TransientTelegramError, match="offline"):
-        await failure_gateway.search_videos(-1001, "", None, None, 20)
+    await failure_gateway.connect()
+    try:
+        with pytest.raises(TransientTelegramError, match="offline"):
+            await failure_gateway.search_videos(-1001, "", None, None, 20)
+    finally:
+        await failure_gateway.disconnect()
 
 
 @pytest.mark.asyncio
 async def test_search_videos_preserves_cancellation(tmp_path: Path) -> None:
     started = asyncio.Event()
 
-    class BlockingClient:
+    class BlockingClient(LifecycleClient):
         async def iter_messages(self, *_args, **_kwargs):
             started.set()
             await asyncio.Event().wait()
@@ -306,13 +514,17 @@ async def test_search_videos_preserves_cancellation(tmp_path: Path) -> None:
         Credentials(123, "hash"),
         client_factory=lambda *_args, **_kwargs: BlockingClient(),
     )
-    task = asyncio.create_task(
-        blocking_gateway.search_videos(-1001, "", None, None, 20)
-    )
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await blocking_gateway.connect()
+    try:
+        task = asyncio.create_task(
+            blocking_gateway.search_videos(-1001, "", None, None, 20)
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await blocking_gateway.disconnect()
 
 
 @pytest.mark.asyncio
@@ -326,7 +538,7 @@ async def test_list_groups_and_channels_excludes_private_chats_and_sorts(
         SimpleNamespace(id=-1001, name="Alpha", is_group=True, is_channel=False),
     )
 
-    class FakeClient:
+    class FakeClient(LifecycleClient):
         async def iter_dialogs(self):
             for dialog in dialogs:
                 yield dialog
@@ -349,11 +561,15 @@ async def test_list_groups_and_channels_excludes_private_chats_and_sorts(
         client_factory=client_factory,
     )
 
-    assert await gateway.list_groups() == (
-        GroupTarget(-1001, "Alpha", False),
-        GroupTarget(-1002, "beta", False),
-        GroupTarget(-1003, "News", False),
-    )
+    await gateway.connect()
+    try:
+        assert await gateway.list_groups() == (
+            GroupTarget(-1001, "Alpha", False),
+            GroupTarget(-1002, "beta", False),
+            GroupTarget(-1003, "News", False),
+        )
+    finally:
+        await gateway.disconnect()
     assert captured["session"] == str(paths.session)
     assert captured["options"] == {
         "auto_reconnect": True,
@@ -381,8 +597,9 @@ class DownloadStream:
         self.closed = True
 
 
-class DownloadClient:
+class DownloadClient(LifecycleClient):
     def __init__(self, chunks: tuple[bytes, ...], media_size: int) -> None:
+        super().__init__()
         self.chunks = chunks
         self.media_size = media_size
         self.download_offsets: list[int] = []
@@ -417,13 +634,17 @@ async def test_download_appends_from_offset_and_reports_progress(
     destination.write_bytes(b"abc")
     progress: list[tuple[int, int | None]] = []
 
-    result = await gateway.download_message(
-        -1001,
-        1,
-        destination,
-        offset=3,
-        progress_callback=lambda current, total: progress.append((current, total)),
-    )
+    await gateway.connect()
+    try:
+        result = await gateway.download_message(
+            -1001,
+            1,
+            destination,
+            offset=3,
+            progress_callback=lambda current, total: progress.append((current, total)),
+        )
+    finally:
+        await gateway.disconnect()
 
     assert result == destination
     assert destination.read_bytes() == b"abcdefghi"
@@ -442,8 +663,9 @@ async def test_download_appends_from_offset_and_reports_progress(
 
 @pytest.mark.asyncio
 async def test_two_step_password_retry_does_not_resubmit_code(tmp_path: Path) -> None:
-    class PasswordClient:
+    class PasswordClient(LifecycleClient):
         def __init__(self) -> None:
+            super().__init__()
             self.sign_in_calls = []
 
         async def sign_in(self, **values) -> None:
@@ -458,9 +680,13 @@ async def test_two_step_password_retry_does_not_resubmit_code(tmp_path: Path) ->
         client_factory=lambda *args, **kwargs: client,
     )
 
-    with pytest.raises(AuthenticationRequiredError, match="二步验证密码"):
-        await gateway.complete_login("+8613800000000", "123456")
-    await gateway.complete_login("+8613800000000", "123456", "two-factor")
+    await gateway.connect()
+    try:
+        with pytest.raises(AuthenticationRequiredError, match="二步验证密码"):
+            await gateway.complete_login("+8613800000000", "123456")
+        await gateway.complete_login("+8613800000000", "123456", "two-factor")
+    finally:
+        await gateway.disconnect()
 
     assert client.sign_in_calls == [
         {"phone": "+8613800000000", "code": "123456"},
@@ -486,7 +712,7 @@ class FakeQrLogin:
 async def test_qr_login_create_refresh_and_wait(tmp_path: Path) -> None:
     qr = FakeQrLogin()
 
-    class QrClient:
+    class QrClient(LifecycleClient):
         async def qr_login(self) -> FakeQrLogin:
             return qr
 
@@ -496,9 +722,13 @@ async def test_qr_login_create_refresh_and_wait(tmp_path: Path) -> None:
         client_factory=lambda *args, **kwargs: QrClient(),
     )
 
-    first = await gateway.start_qr_login()
-    second = await gateway.refresh_qr_login()
-    await gateway.wait_qr_login()
+    await gateway.connect()
+    try:
+        first = await gateway.start_qr_login()
+        second = await gateway.refresh_qr_login()
+        await gateway.wait_qr_login()
+    finally:
+        await gateway.disconnect()
 
     assert first.url.endswith("first")
     assert first.expires_at == qr.expires
@@ -509,8 +739,9 @@ async def test_qr_login_create_refresh_and_wait(tmp_path: Path) -> None:
 async def test_qr_wait_maps_expiry_and_two_step_password(tmp_path: Path) -> None:
     qr = FakeQrLogin()
 
-    class QrClient:
+    class QrClient(LifecycleClient):
         def __init__(self) -> None:
+            super().__init__()
             self.passwords: list[str] = []
 
         async def qr_login(self) -> FakeQrLogin:
@@ -525,16 +756,20 @@ async def test_qr_wait_maps_expiry_and_two_step_password(tmp_path: Path) -> None
         Credentials(12345, "hash"),
         client_factory=lambda *args, **kwargs: client,
     )
-    await gateway.start_qr_login()
+    await gateway.connect()
+    try:
+        await gateway.start_qr_login()
 
-    qr.wait_error = TimeoutError()
-    with pytest.raises(QrLoginExpiredError):
-        await gateway.wait_qr_login()
+        qr.wait_error = TimeoutError()
+        with pytest.raises(QrLoginExpiredError):
+            await gateway.wait_qr_login()
 
-    qr.wait_error = errors.SessionPasswordNeededError(request=None)
-    with pytest.raises(AuthenticationRequiredError, match="二步验证密码"):
-        await gateway.wait_qr_login()
-    await gateway.complete_password("two-factor")
+        qr.wait_error = errors.SessionPasswordNeededError(request=None)
+        with pytest.raises(AuthenticationRequiredError, match="二步验证密码"):
+            await gateway.wait_qr_login()
+        await gateway.complete_password("two-factor")
+    finally:
+        await gateway.disconnect()
 
     assert client.passwords == ["two-factor"]
 
@@ -551,8 +786,9 @@ def test_qr_login_error_mapping_preserves_user_action_and_retry_time() -> None:
 
 @pytest.mark.asyncio
 async def test_gateway_logs_out_current_session(tmp_path: Path) -> None:
-    class LogOutClient:
+    class LogOutClient(LifecycleClient):
         def __init__(self) -> None:
+            super().__init__()
             self.logged_out = False
 
         async def log_out(self) -> None:
@@ -565,6 +801,10 @@ async def test_gateway_logs_out_current_session(tmp_path: Path) -> None:
         client_factory=lambda *args, **kwargs: client,
     )
 
-    await gateway.log_out()
+    await gateway.connect()
+    try:
+        await gateway.log_out()
+    finally:
+        await gateway.disconnect()
 
     assert client.logged_out is True
