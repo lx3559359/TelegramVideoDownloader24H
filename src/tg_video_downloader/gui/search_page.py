@@ -10,6 +10,7 @@ from tkinter import ttk
 from typing import Any
 
 from tg_video_downloader.gui.controller import AsyncBridge, GuiController
+from tg_video_downloader.gui.date_picker import DatePicker
 from tg_video_downloader.models import GroupTarget, VideoSearchResult
 from tg_video_downloader.selective import (
     SearchQueueState,
@@ -163,8 +164,6 @@ class VideoSearchPage(ttk.Frame):
 
         self.target_var = tk.StringVar()
         self.keyword_var = tk.StringVar()
-        self.start_date_var = tk.StringVar()
-        self.end_date_var = tk.StringVar()
         self.limit_var = tk.StringVar(value="100")
         self.status_var = tk.StringVar(value="尚未检索")
         self.count_var = tk.StringVar(value="结果 0，已选 0")
@@ -202,7 +201,8 @@ class VideoSearchPage(ttk.Frame):
             padx=(0, 6),
             pady=(8, 0),
         )
-        ttk.Entry(toolbar, textvariable=self.start_date_var).grid(
+        self.start_date_picker = DatePicker(toolbar, label="开始日期")
+        self.start_date_picker.grid(
             row=1,
             column=1,
             sticky="ew",
@@ -215,7 +215,8 @@ class VideoSearchPage(ttk.Frame):
             padx=(0, 6),
             pady=(8, 0),
         )
-        ttk.Entry(toolbar, textvariable=self.end_date_var).grid(
+        self.end_date_picker = DatePicker(toolbar, label="结束日期")
+        self.end_date_picker.grid(
             row=1,
             column=3,
             sticky="ew",
@@ -350,8 +351,8 @@ class VideoSearchPage(ttk.Frame):
             operation = self.controller.search_videos(
                 group.chat_id,
                 self.keyword_var.get(),
-                self.start_date_var.get(),
-                self.end_date_var.get(),
+                self.start_date_picker.get(),
+                self.end_date_picker.get(),
                 int(self.limit_var.get()),
             )
             submission = self.bridge.submit_cancellable(operation)
@@ -383,6 +384,8 @@ class VideoSearchPage(ttk.Frame):
             on_finished()
 
     def close(self) -> None:
+        self.start_date_picker.close_popup()
+        self.end_date_picker.close_popup()
         self.generation += 1
         if self.poll_after is not None:
             try:

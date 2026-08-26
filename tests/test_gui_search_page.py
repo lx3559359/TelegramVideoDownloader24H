@@ -1,6 +1,6 @@
 import tkinter as tk
 from concurrent.futures import Future
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from tkinter import ttk
 from types import SimpleNamespace
 
@@ -277,6 +277,14 @@ def test_search_page_builds_lightweight_controls_and_no_timer_until_search(
 
     assert notebook.tab(page, "text") == "视频检索"
     assert page.limit_var.get() == "100"
+    assert page.start_date_picker.get() == ""
+    assert page.end_date_picker.get() == ""
+    assert page.start_date_picker.display_var.get() == "不限"
+    assert page.end_date_picker.display_var.get() == "不限"
+    assert str(page.start_date_picker.entry.cget("state")) == "readonly"
+    assert str(page.end_date_picker.entry.cget("state")) == "readonly"
+    assert page.start_date_picker.popup is None
+    assert page.end_date_picker.popup is None
     assert page.search_future is None
     assert page.poll_after is None
     assert tuple(str(value) for value in page.result_tree["show"]) == ("headings",)
@@ -292,6 +300,60 @@ def test_search_page_builds_lightweight_controls_and_no_timer_until_search(
     assert page.cancel_button.instate(["disabled"])
     assert page.enqueue_button.instate(["disabled"])
     page.close()
+
+
+def test_search_page_passes_selected_iso_dates_to_controller(
+    tk_root: tk.Tk,
+) -> None:
+    notebook = ttk.Notebook(tk_root)
+    controller = FakeSearchController()
+    page = VideoSearchPage(
+        notebook,
+        controller=controller,
+        bridge=FakeSearchBridge(),
+        show_error=lambda _error: None,
+    )
+    install_fake_scheduler(page)
+    page.start_date_picker.set_date(date(2026, 8, 1))
+    page.end_date_picker.set_date(date(2026, 8, 26))
+
+    page.start_search()
+
+    assert controller.search_calls == [
+        (-1001, "", "2026-08-01", "2026-08-26", 100)
+    ]
+    page.close()
+
+
+def test_search_page_date_pickers_fit_900x720(tk_root: tk.Tk) -> None:
+    tk_root.deiconify()
+    tk_root.geometry("900x720")
+    notebook = ttk.Notebook(tk_root)
+    notebook.pack(fill="both", expand=True)
+    page = VideoSearchPage(
+        notebook,
+        controller=FakeSearchController(),
+        bridge=FakeSearchBridge(),
+        show_error=lambda _error: None,
+    )
+    try:
+        tk_root.update()
+        assert page.start_date_picker.winfo_viewable()
+        assert page.end_date_picker.winfo_viewable()
+        assert page.search_button.winfo_viewable()
+        assert page.result_tree.winfo_viewable()
+        assert page.enqueue_button.winfo_viewable()
+        assert page.start_date_picker.popup is None
+        assert page.end_date_picker.popup is None
+
+        page.start_date_picker.open_popup()
+        assert page.start_date_picker.popup is not None
+        page.start_date_picker.close_popup()
+        assert page.start_date_picker.popup is None
+    finally:
+        page.close()
+        notebook.destroy()
+        tk_root.withdraw()
 
 
 def test_search_page_completes_one_future_and_returns_to_idle(
