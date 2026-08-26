@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,9 +10,21 @@ from tg_video_downloader.gateway import AuthenticationRequiredError, QrLoginChal
 from tg_video_downloader.diagnostics import DiagnosticCheck, DiagnosticReport
 from tg_video_downloader.gui.app import format_doctor_summary
 from tg_video_downloader.gui.controller import GuiController
-from tg_video_downloader.models import Credentials, GroupTarget
+from tg_video_downloader.models import (
+    Credentials,
+    GroupTarget,
+    JobSource,
+    MessageInfo,
+    VideoSearchResult,
+)
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.selective import (
+    ManualQueueSummary,
+    SearchQueueState,
+    SelectableVideo,
+)
+from tg_video_downloader.state import StateStore
 from tg_video_downloader.update import UpdateResult, write_update_result
 
 
@@ -34,12 +46,16 @@ class LoginGateway:
         self.password_required = False
         self.passwords: list[str] = []
         self.logged_out = False
+        self.disconnect_calls = 0
+        self.search_results: tuple[VideoSearchResult, ...] = ()
+        self.search_calls: list[SimpleNamespace] = []
 
     async def connect(self) -> None:
         self.connected = True
 
     async def disconnect(self) -> None:
         self.connected = False
+        self.disconnect_calls += 1
 
     async def is_authorized(self) -> bool:
         return self.authorized
@@ -74,6 +90,25 @@ class LoginGateway:
     async def list_groups(self) -> tuple[GroupTarget, ...]:
         return self.groups
 
+    async def search_videos(
+        self,
+        chat_id: int,
+        keyword: str,
+        start_utc: datetime | None,
+        end_utc: datetime | None,
+        result_limit: int,
+    ) -> tuple[VideoSearchResult, ...]:
+        self.search_calls.append(
+            SimpleNamespace(
+                chat_id=chat_id,
+                keyword=keyword,
+                start_utc=start_utc,
+                end_utc=end_utc,
+                result_limit=result_limit,
+            )
+        )
+        return self.search_results
+
 
 class FakeProcessControl:
     def __init__(self) -> None:
@@ -100,6 +135,25 @@ def make_controller(tmp_path: Path):
         process_control=process,
     )
     return controller, paths, gateway, process
+
+
+def video_search_result(chat_id: int, message_id: int) -> VideoSearchResult:
+    return VideoSearchResult(
+        MessageInfo(
+            chat_id=chat_id,
+            message_id=message_id,
+            date=datetime(2026, 8, 24, 1, tzinfo=UTC),
+            mime_type="video/mp4",
+            original_name=f"video-{message_id}.mp4",
+            extension=".mp4",
+            size=200,
+            is_video=True,
+            is_animated=False,
+            is_round=False,
+        ),
+        duration_seconds=65,
+        caption="课程",
+    )
 
 
 def test_save_credentials_and_selected_groups(tmp_path: Path) -> None:
@@ -560,3 +614,177 @@ def test_format_doctor_summary_includes_all_outcome_counts() -> None:
     assert "警告：1" in summary
     assert "失败：1" in summary
     assert "doctor.json" in summary
+
+
+@pytest.mark.asyncio
+async def test_controller_searches_selected_group_and_attaches_queue_state(
+    tmp_path: Path,
+) -> None:
+    controller, paths, gateway, _ = make_controller(tmp_path)
+    controller.save_credentials(Credentials(123, "hash"))
+    group = GroupTarget(-1001, "课程群", False)
+    controller.save_selected_groups((group,))
+    available = video_search_result(group.chat_id, 9)
+    queued = video_search_result(group.chat_id, 10)
+    gateway.search_results = (available, queued)
+    state = StateStore(paths.database)
+    try:
+        state.reconcile_targets((group,))
+        state.upsert_job(queued.message, group.title, JobSource.LIVE)
+    finally:
+        state.close()
+
+    items = await controller.search_videos(
+        group.chat_id,
+        "课程",
+        "2026-08-01",
+        "2026-08-31",
+        100,
+        local_timezone=timezone(timedelta(hours=8)),
+    )
+
+    assert items == (
+        SelectableVideo(available, SearchQueueState.AVAILABLE),
+        SelectableVideo(queued, SearchQueueState.QUEUED),
+    )
+    call = gateway.search_calls[0]
+    assert call.chat_id == group.chat_id
+    assert call.keyword == "课程"
+    assert call.start_utc.isoformat() == "2026-07-31T16:00:00+00:00"
+    assert call.end_utc.isoformat() == "2026-08-31T16:00:00+00:00"
+    assert call.result_limit == 100
+    assert gateway.connected is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "arguments", "message"),
+    [
+        ("missing_credentials", (-1001, "", "", "", 20), "账号信息"),
+        ("unknown_group", (-2002, "", "", "", 20), "已监听"),
+        ("active_login", (-1001, "", "", "", 20), "登录任务"),
+        ("invalid_date", (-1001, "", "2026/08/01", "", 20), "YYYY-MM-DD"),
+        ("invalid_limit", (-1001, "", "", "", 10), "20、50 或 100"),
+    ],
+)
+async def test_controller_rejects_invalid_search_before_connecting(
+    tmp_path: Path,
+    setup: str,
+    arguments: tuple[int, str, str, str, int],
+    message: str,
+) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    if setup != "missing_credentials":
+        controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+    if setup == "active_login":
+        controller._login_gateway = gateway
+
+    with pytest.raises(ValueError, match=message):
+        await controller.search_videos(*arguments, local_timezone=UTC)
+
+    assert gateway.search_calls == []
+    assert gateway.disconnect_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_controller_rejects_unauthorized_search_and_disconnects(
+    tmp_path: Path,
+) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+    gateway.authorized = False
+
+    with pytest.raises(AuthenticationRequiredError, match="登录"):
+        await controller.search_videos(-1001, "", "", "", 20)
+
+    assert gateway.connected is False
+    assert gateway.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_controller_cancelled_search_disconnects_and_writes_no_jobs(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+
+    class BlockingSearchGateway(LoginGateway):
+        async def search_videos(self, *_args, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+            return ()
+
+    paths = ProjectPaths.from_root(tmp_path)
+    gateway = BlockingSearchGateway()
+    controller = GuiController(paths, lambda *_: gateway)
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+    task = asyncio.create_task(
+        controller.search_videos(-1001, "", "", "", 20)
+    )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert gateway.connected is False
+    assert gateway.disconnect_calls == 1
+    state = StateStore(paths.database)
+    try:
+        assert state.job_count() == 0
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_controller_preserves_search_error_when_disconnect_also_fails(
+    tmp_path: Path,
+) -> None:
+    class DoubleFailureGateway(LoginGateway):
+        async def search_videos(self, *_args, **_kwargs):
+            raise RuntimeError("search failed")
+
+        async def disconnect(self) -> None:
+            raise RuntimeError("disconnect failed")
+
+    paths = ProjectPaths.from_root(tmp_path)
+    gateway = DoubleFailureGateway()
+    controller = GuiController(paths, lambda *_: gateway)
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+
+    with pytest.raises(RuntimeError, match="search failed"):
+        await controller.search_videos(-1001, "", "", "", 20)
+
+
+def test_controller_enqueues_selected_results_and_rechecks_target(
+    tmp_path: Path,
+) -> None:
+    controller, _, _, _ = make_controller(tmp_path)
+    group = GroupTarget(-1001, "课程群", False)
+    controller.save_selected_groups((group,))
+    result = video_search_result(group.chat_id, 50)
+
+    assert controller.enqueue_selected_videos(group.chat_id, (result,)) == (
+        ManualQueueSummary(added=1)
+    )
+
+    controller.save_selected_groups((GroupTarget(-2002, "其他群", False),))
+    with pytest.raises(ValueError, match="已监听"):
+        controller.enqueue_selected_videos(group.chat_id, (result,))
+
+
+def test_controller_rejects_empty_or_cross_target_enqueue(tmp_path: Path) -> None:
+    controller, _, _, _ = make_controller(tmp_path)
+    group = GroupTarget(-1001, "课程群", False)
+    controller.save_selected_groups((group,))
+
+    with pytest.raises(ValueError, match="至少选择"):
+        controller.enqueue_selected_videos(group.chat_id, ())
+    with pytest.raises(ValueError, match="当前目标"):
+        controller.enqueue_selected_videos(
+            group.chat_id,
+            (video_search_result(-2002, 51),),
+        )

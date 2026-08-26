@@ -6,7 +6,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
@@ -17,9 +17,22 @@ from tg_video_downloader.gateway import (
     QrLoginChallenge,
     TelegramGateway,
 )
-from tg_video_downloader.models import AppConfig, Credentials, GroupTarget
+from tg_video_downloader.models import (
+    AppConfig,
+    Credentials,
+    GroupTarget,
+    VideoSearchResult,
+)
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.selective import (
+    ManualQueueSummary,
+    SelectableVideo,
+    parse_search_dates,
+    queue_state_for,
+    validate_search_limit,
+)
+from tg_video_downloader.state import StateStore
 from tg_video_downloader.storage import (
     effective_download_root,
     require_writable_download_root,
@@ -108,12 +121,14 @@ class GuiController:
         gateway_factory: Callable[[ProjectPaths, Credentials], TelegramGateway],
         *,
         process_control: ProcessControl | None = None,
+        state_factory: Callable[[Path], StateStore] = StateStore,
     ) -> None:
         self.paths = paths
         self.paths.ensure_directories()
         self.config_store = ConfigStore(paths)
         self.gateway_factory = gateway_factory
         self.process_control = process_control or WindowsProcessControl()
+        self.state_factory = state_factory
         self._login_gateway: TelegramGateway | None = None
         self._login_credentials: Credentials | None = None
         self.update_manager: UpdateManager | None = None
@@ -272,6 +287,104 @@ class GuiController:
             return await gateway.list_groups()
         finally:
             await gateway.disconnect()
+
+    async def search_videos(
+        self,
+        chat_id: int,
+        keyword: str,
+        start_text: str,
+        end_text: str,
+        limit: int,
+        *,
+        local_timezone: tzinfo | None = None,
+    ) -> tuple[SelectableVideo, ...]:
+        if self.login_active:
+            raise ValueError("请先完成或取消当前登录任务")
+        groups = {group.chat_id: group for group in self.selected_groups()}
+        if chat_id not in groups:
+            raise ValueError("只能检索当前已监听的群组或频道")
+        credentials = self.load_credentials()
+        if credentials is None:
+            raise ValueError("请先填写并保存账号信息")
+        timezone_value = local_timezone or datetime.now().astimezone().tzinfo
+        if timezone_value is None:
+            timezone_value = UTC
+        start_utc, end_utc = parse_search_dates(
+            start_text,
+            end_text,
+            timezone_value,
+        )
+        result_limit = validate_search_limit(limit)
+        gateway = self.gateway_factory(self.paths, credentials)
+        active_error: BaseException | None = None
+        try:
+            await gateway.connect()
+            if not await gateway.is_authorized():
+                raise AuthenticationRequiredError("请先完成 Telegram 登录")
+            results = await gateway.search_videos(
+                chat_id,
+                keyword,
+                start_utc,
+                end_utc,
+                result_limit,
+            )
+        except BaseException as error:
+            active_error = error
+            raise
+        finally:
+            try:
+                await gateway.disconnect()
+            except Exception:
+                if active_error is None:
+                    raise
+        return await asyncio.to_thread(self._attach_queue_states, results)
+
+    def _attach_queue_states(
+        self,
+        results: tuple[VideoSearchResult, ...],
+    ) -> tuple[SelectableVideo, ...]:
+        store = self.state_factory(self.paths.database)
+        try:
+            keys = tuple(
+                (result.message.chat_id, result.message.message_id)
+                for result in results
+            )
+            statuses = store.job_statuses(keys)
+        finally:
+            store.close()
+        return tuple(
+            SelectableVideo(
+                result,
+                queue_state_for(
+                    statuses.get(
+                        (result.message.chat_id, result.message.message_id)
+                    )
+                ),
+            )
+            for result in results
+        )
+
+    def enqueue_selected_videos(
+        self,
+        chat_id: int,
+        results: tuple[VideoSearchResult, ...],
+    ) -> ManualQueueSummary:
+        groups = {group.chat_id: group for group in self.selected_groups()}
+        group = groups.get(chat_id)
+        if group is None:
+            raise ValueError("只能下载当前已监听目标的检索结果")
+        if not results:
+            raise ValueError("请至少选择一个视频")
+        if any(result.message.chat_id != chat_id for result in results):
+            raise ValueError("检索结果与当前目标不一致")
+        store = self.state_factory(self.paths.database)
+        try:
+            return store.enqueue_manual_results(
+                group,
+                tuple(result.message for result in results),
+            )
+        finally:
+            store.close()
 
     def selected_groups(self) -> tuple[GroupTarget, ...]:
         try:
