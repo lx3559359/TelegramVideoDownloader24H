@@ -1,18 +1,31 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import mimetypes
 import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from telethon import TelegramClient, errors, events
+from telethon.tl.types import InputMessagesFilterVideo
 
-from tg_video_downloader.models import Credentials, GroupTarget, MessageInfo
+from tg_video_downloader.media import is_downloadable_video
+from tg_video_downloader.models import (
+    Credentials,
+    GroupTarget,
+    MessageInfo,
+    VideoSearchResult,
+)
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.selective import (
+    MAX_SEARCH_CANDIDATES,
+    normalize_search_caption,
+)
 
 
 class AuthenticationRequiredError(RuntimeError):
@@ -82,6 +95,15 @@ class TelegramGateway(Protocol):
     async def log_out(self) -> None: ...
 
     async def list_groups(self) -> tuple[GroupTarget, ...]: ...
+
+    async def search_videos(
+        self,
+        chat_id: int,
+        keyword: str,
+        start_utc: datetime | None,
+        end_utc: datetime | None,
+        result_limit: int,
+    ) -> tuple[VideoSearchResult, ...]: ...
 
     def set_new_message_handler(self, handler: MessageHandler) -> None: ...
 
@@ -162,6 +184,23 @@ def normalize_message(message: Any, chat_id: int) -> MessageInfo:
         is_animated=is_animated,
         is_round=is_round,
     )
+
+
+def _video_duration(message: Any) -> int | None:
+    document = getattr(message, "document", None)
+    attributes = getattr(document, "attributes", ()) if document else ()
+    for attribute in attributes:
+        if type(attribute).__name__ != "DocumentAttributeVideo":
+            continue
+        value = getattr(attribute, "duration", None)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
+            return int(value)
+    return None
 
 
 class TelethonGateway:
@@ -303,6 +342,51 @@ class TelethonGateway:
         except Exception as error:
             raise _mapped_error(error) from error
         return tuple(sorted(groups, key=lambda group: group.title.casefold()))
+
+    async def search_videos(
+        self,
+        chat_id: int,
+        keyword: str,
+        start_utc: datetime | None,
+        end_utc: datetime | None,
+        result_limit: int,
+    ) -> tuple[VideoSearchResult, ...]:
+        results: list[VideoSearchResult] = []
+        try:
+            async for raw in self._client.iter_messages(
+                chat_id,
+                limit=MAX_SEARCH_CANDIDATES,
+                search=keyword.strip() or None,
+                filter=InputMessagesFilterVideo,
+                offset_date=end_utc,
+            ):
+                message = normalize_message(raw, chat_id)
+                message_date = message.date
+                if message_date.tzinfo is None:
+                    message_date = message_date.replace(tzinfo=UTC)
+                message_date = message_date.astimezone(UTC)
+                if start_utc is not None and message_date < start_utc:
+                    break
+                if end_utc is not None and message_date >= end_utc:
+                    continue
+                if not is_downloadable_video(message):
+                    continue
+                results.append(
+                    VideoSearchResult(
+                        message=message,
+                        duration_seconds=_video_duration(raw),
+                        caption=normalize_search_caption(
+                            getattr(raw, "message", "")
+                        ),
+                    )
+                )
+                if len(results) >= result_limit:
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise _mapped_error(error) from error
+        return tuple(results)
 
     def set_new_message_handler(self, handler: MessageHandler) -> None:
         if self._event_callback is not None:

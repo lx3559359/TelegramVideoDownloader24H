@@ -1,9 +1,11 @@
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from telethon import errors
+from telethon.tl.types import InputMessagesFilterVideo
 
 from tg_video_downloader.gateway import (
     AuthenticationRequiredError,
@@ -74,6 +76,243 @@ def test_normalize_animated_and_round_attributes() -> None:
     assert animated.is_animated is True
     assert round_video.is_video is True
     assert round_video.is_round is True
+
+
+def _search_message(
+    message_id: int,
+    date: datetime,
+    *,
+    mime_type: str = "video/mp4",
+    attributes=(),
+    caption: str = "",
+):
+    document = SimpleNamespace(
+        mime_type=mime_type,
+        size=message_id * 100,
+        attributes=list(attributes),
+    )
+    return SimpleNamespace(
+        id=message_id,
+        date=date,
+        document=document,
+        video=None,
+        video_note=None,
+        gif=None,
+        file=SimpleNamespace(
+            name=f"video-{message_id}.mp4",
+            ext=".mp4",
+            size=message_id * 100,
+            mime_type=mime_type,
+        ),
+        message=caption,
+    )
+
+
+class SearchClient:
+    def __init__(self, messages) -> None:
+        self.messages = tuple(messages)
+        self.options = {}
+        self.yield_count = 0
+
+    async def iter_messages(self, chat_id: int, **options):
+        self.options = {"chat_id": chat_id, **options}
+        for message in self.messages[: options["limit"]]:
+            self.yield_count += 1
+            yield message
+
+
+@pytest.mark.asyncio
+async def test_search_videos_is_server_filtered_bounded_and_latest_first(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    end = datetime(2026, 9, 1, tzinfo=UTC)
+    video = _attribute(
+        "DocumentAttributeVideo",
+        duration=95,
+        round_message=False,
+    )
+    messages = (
+        _search_message(10, datetime(2026, 9, 2, tzinfo=UTC), attributes=(video,)),
+        _search_message(
+            9,
+            datetime(2026, 8, 24, tzinfo=UTC),
+            attributes=(video,),
+            caption="第一段\n说明",
+        ),
+        _search_message(
+            8,
+            datetime(2026, 8, 23, tzinfo=UTC),
+            attributes=(video, _attribute("DocumentAttributeAnimated")),
+        ),
+        _search_message(
+            75,
+            datetime(2026, 8, 22, 12, tzinfo=UTC),
+            attributes=(
+                _attribute(
+                    "DocumentAttributeVideo",
+                    duration=30,
+                    round_message=True,
+                ),
+            ),
+        ),
+        _search_message(7, datetime(2026, 8, 22, tzinfo=UTC)),
+        _search_message(
+            6,
+            datetime(2026, 8, 21, tzinfo=UTC),
+            mime_type="application/pdf",
+        ),
+        _search_message(5, datetime(2026, 7, 31, tzinfo=UTC), attributes=(video,)),
+    )
+    client = SearchClient(messages)
+    gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path),
+        Credentials(123, "hash"),
+        client_factory=lambda *_args, **_kwargs: client,
+    )
+
+    results = await gateway.search_videos(-1001, "课程", start, end, 20)
+
+    assert [item.message.message_id for item in results] == [9, 7]
+    assert results[0].duration_seconds == 95
+    assert results[0].caption == "第一段 说明"
+    assert client.options["chat_id"] == -1001
+    assert client.options["limit"] == 500
+    assert client.options["search"] == "课程"
+    assert client.options["offset_date"] == end
+    assert client.options["filter"] is InputMessagesFilterVideo
+
+
+@pytest.mark.asyncio
+async def test_search_videos_stops_at_requested_result_limit(tmp_path: Path) -> None:
+    video = _attribute("DocumentAttributeVideo", duration=1, round_message=False)
+    messages = (
+        _search_message(
+            message_id,
+            datetime(2026, 8, 24, tzinfo=UTC),
+            attributes=(video,),
+        )
+        for message_id in range(150, 0, -1)
+    )
+    client = SearchClient(messages)
+    gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path),
+        Credentials(123, "hash"),
+        client_factory=lambda *_args, **_kwargs: client,
+    )
+
+    results = await gateway.search_videos(-1001, "", None, None, 100)
+
+    assert len(results) == 100
+    assert client.yield_count == 100
+    assert client.options["search"] is None
+
+
+@pytest.mark.asyncio
+async def test_search_videos_caps_nonmatching_candidates_at_500(
+    tmp_path: Path,
+) -> None:
+    messages = (
+        _search_message(
+            message_id,
+            datetime(2026, 8, 24, tzinfo=UTC),
+            mime_type="application/pdf",
+        )
+        for message_id in range(600, 0, -1)
+    )
+    client = SearchClient(messages)
+    gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path),
+        Credentials(123, "hash"),
+        client_factory=lambda *_args, **_kwargs: client,
+    )
+
+    results = await gateway.search_videos(-1001, "", None, None, 20)
+
+    assert results == ()
+    assert client.yield_count == 500
+
+
+@pytest.mark.asyncio
+async def test_search_videos_ignores_invalid_duration_metadata(tmp_path: Path) -> None:
+    messages = (
+        _search_message(
+            2,
+            datetime(2026, 8, 24, tzinfo=UTC),
+            attributes=(
+                _attribute(
+                    "DocumentAttributeVideo",
+                    duration=float("inf"),
+                    round_message=False,
+                ),
+            ),
+        ),
+        _search_message(
+            1,
+            datetime(2026, 8, 23, tzinfo=UTC),
+            attributes=(
+                _attribute(
+                    "DocumentAttributeVideo",
+                    duration=-1,
+                    round_message=False,
+                ),
+            ),
+        ),
+    )
+    client = SearchClient(messages)
+    gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path),
+        Credentials(123, "hash"),
+        client_factory=lambda *_args, **_kwargs: client,
+    )
+
+    results = await gateway.search_videos(-1001, "", None, None, 20)
+
+    assert [item.duration_seconds for item in results] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_search_videos_maps_client_errors(
+    tmp_path: Path,
+) -> None:
+    class FailingClient:
+        async def iter_messages(self, *_args, **_kwargs):
+            if False:
+                yield None
+            raise ConnectionError("offline")
+
+    failure_gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path / "failure"),
+        Credentials(123, "hash"),
+        client_factory=lambda *_args, **_kwargs: FailingClient(),
+    )
+    with pytest.raises(TransientTelegramError, match="offline"):
+        await failure_gateway.search_videos(-1001, "", None, None, 20)
+
+
+@pytest.mark.asyncio
+async def test_search_videos_preserves_cancellation(tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    class BlockingClient:
+        async def iter_messages(self, *_args, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+            if False:
+                yield None
+
+    blocking_gateway = TelethonGateway(
+        ProjectPaths.from_root(tmp_path / "cancel"),
+        Credentials(123, "hash"),
+        client_factory=lambda *_args, **_kwargs: BlockingClient(),
+    )
+    task = asyncio.create_task(
+        blocking_gateway.search_videos(-1001, "", None, None, 20)
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
