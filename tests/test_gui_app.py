@@ -565,6 +565,96 @@ def test_close_returns_immediately_after_first_cleanup() -> None:
     app.close()
 
 
+def test_save_groups_refreshes_video_search_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = object.__new__(DownloaderApp)
+    app._groups = (
+        SimpleNamespace(chat_id=-1001, title="课程群"),
+        SimpleNamespace(chat_id=-1002, title="其他群"),
+    )
+    app._selected_ids = {-1001}
+    app._history_ids = set()
+    saved: list[tuple[object, ...]] = []
+    refreshed: list[bool] = []
+    app.controller = SimpleNamespace(
+        save_selected_groups=lambda groups: saved.append(groups)
+    )
+    app.search_page = SimpleNamespace(
+        refresh_targets=lambda: refreshed.append(True)
+    )
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.app.messagebox.showinfo",
+        lambda *_args, **_kwargs: None,
+    )
+
+    app._save_groups()
+
+    assert [group.chat_id for group in saved[0]] == [-1001]
+    assert refreshed == [True]
+
+
+def test_logout_cancels_search_before_controller_logout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = object.__new__(DownloaderApp)
+    actions: list[object] = []
+    app.controller = SimpleNamespace(log_out=lambda: "logout-operation")
+    app.logout_button = object()
+    app.search_page = SimpleNamespace(
+        cancel_search=lambda on_finished: (
+            actions.append("cancel-search"),
+            on_finished(),
+        ),
+        clear_results=lambda status: actions.append(("clear", status)),
+    )
+    app._finish_qr_login = lambda status: actions.append(("finish", status))
+
+    def run_async(operation, button, on_success) -> None:
+        actions.append(("run", operation, button))
+        on_success("已退出当前账号")
+
+    app._run_async = run_async
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.app.messagebox.askyesno",
+        lambda *_args, **_kwargs: True,
+    )
+
+    app._log_out()
+
+    assert actions == [
+        "cancel-search",
+        ("run", "logout-operation", app.logout_button),
+        ("finish", "已退出当前账号"),
+        ("clear", "已退出账号"),
+    ]
+
+
+def test_close_closes_search_page_before_async_bridge() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app._qr_generation = 0
+    app._status_after = None
+    app._cancel_qr_callbacks = lambda: None
+    app.controller = SimpleNamespace(cancel_login=lambda: object())
+    app.code_var = FakeVar("code")
+    app.password_var = FakeVar("password")
+    app.qr_password_var = FakeVar("qr-password")
+    app.qr_canvas = SimpleNamespace(delete=lambda *_args: None)
+    actions: list[str] = []
+    app.search_page = SimpleNamespace(close=lambda: actions.append("search"))
+    completed: Future[object] = Future()
+    completed.set_result(None)
+    app.bridge = SimpleNamespace(
+        submit=lambda _operation: completed,
+        close=lambda: actions.append("bridge"),
+    )
+
+    app.close()
+
+    assert actions == ["search", "bridge"]
+
+
 def test_status_listener_failure_does_not_corrupt_running_page() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False

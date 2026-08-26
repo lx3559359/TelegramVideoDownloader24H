@@ -23,6 +23,7 @@ from tg_video_downloader.gui.qr_view import (
     retry_delay,
     seconds_until_expiry,
 )
+from tg_video_downloader.gui.search_page import VideoSearchPage
 from tg_video_downloader.models import Credentials, GroupTarget
 
 
@@ -153,6 +154,12 @@ class DownloaderApp(ttk.Frame):
         self.pack(fill="both", expand=True)
         self._build_account_page()
         self._build_groups_page()
+        self.search_page = VideoSearchPage(
+            self.notebook,
+            controller=self.controller,
+            bridge=self.bridge,
+            show_error=self._show_error,
+        )
         self._build_run_page()
         self._build_update_page()
         update_result = self.controller.consume_update_result()
@@ -1002,10 +1009,18 @@ class DownloaderApp(ttk.Frame):
         if not messagebox.askyesno("退出账号", "确认退出当前 Telegram 账号？"):
             return
 
-        def finished(status: str) -> None:
-            self._finish_qr_login(status)
+        def start_logout() -> None:
+            def finished(status: str) -> None:
+                self._finish_qr_login(status)
+                self.search_page.clear_results("已退出账号")
 
-        self._run_async(self.controller.log_out(), self.logout_button, finished)
+            self._run_async(
+                self.controller.log_out(),
+                self.logout_button,
+                finished,
+            )
+
+        self.search_page.cancel_search(on_finished=start_logout)
 
     def _send_code(self) -> None:
         try:
@@ -1119,6 +1134,7 @@ class DownloaderApp(ttk.Frame):
         except Exception as error:
             self._show_error(error)
             return
+        self.search_page.refresh_targets()
         messagebox.showinfo("已保存", f"已保存 {len(groups)} 个群组/频道")
 
     def set_status_listener(
@@ -1282,6 +1298,7 @@ class DownloaderApp(ttk.Frame):
         self.password_var.set("")
         self.qr_password_var.set("")
         self.qr_canvas.delete("all")
+        self.search_page.close()
         self.bridge.close()
 
 
