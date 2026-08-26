@@ -2,6 +2,7 @@ import tkinter as tk
 from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta, timezone
 from tkinter import ttk
+from types import SimpleNamespace
 
 import pytest
 
@@ -233,10 +234,16 @@ class FakeSearchBridge:
     def __init__(self) -> None:
         self.future: Future[tuple[SelectableVideo, ...]] = Future()
         self.submitted: list[object] = []
+        self.cancel_requested = False
 
-    def submit(self, operation: object) -> Future[tuple[SelectableVideo, ...]]:
+    def submit_cancellable(self, operation: object):
         self.submitted.append(operation)
-        return self.future
+
+        def cancel() -> None:
+            self.cancel_requested = True
+            self.future.cancel()
+
+        return SimpleNamespace(future=self.future, cancel=cancel)
 
 
 def install_fake_scheduler(page: VideoSearchPage):
@@ -339,6 +346,7 @@ def test_search_page_cancellation_runs_cleanup_callback_without_partial_rows(
     callback()
 
     assert bridge.future.cancelled() is True
+    assert bridge.cancel_requested is True
     assert page.status_var.get() == "已取消"
     assert page.result_tree.get_children() == ()
     assert finished == [True]
@@ -371,6 +379,7 @@ def test_search_page_discards_result_when_running_future_cannot_cancel(
 
     assert page.result_tree.get_children() == ()
     assert page.status_var.get() == "已取消"
+    assert bridge.cancel_requested is True
     assert finished == [True]
     assert page.poll_after is None
     page.close()
@@ -448,6 +457,7 @@ def test_search_page_close_cancels_future_and_poll_callback(tk_root: tk.Tk) -> N
     page.close()
 
     assert bridge.future.cancelled() is True
+    assert bridge.cancel_requested is True
     assert cancelled == [poll_after]
     assert page.poll_after is None
     assert page.search_future is None

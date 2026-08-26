@@ -45,7 +45,7 @@ def _optional_date(value: str, label: str) -> date | None:
 def parse_search_dates(
     start_text: str,
     end_text: str,
-    local_timezone: tzinfo,
+    local_timezone: tzinfo | None,
 ) -> tuple[datetime | None, datetime | None]:
     start_date = _optional_date(start_text, "开始日期")
     end_date = _optional_date(end_text, "结束日期")

@@ -33,6 +33,13 @@ def test_parse_search_dates_accepts_open_bounds() -> None:
     assert parse_search_dates("", "", UTC) == (None, None)
 
 
+def test_parse_search_dates_can_use_operating_system_local_rules() -> None:
+    start, end = parse_search_dates("2026-08-01", "2026-08-01", None)
+
+    assert start == datetime(2026, 8, 1).astimezone(UTC)
+    assert end == datetime(2026, 8, 2).astimezone(UTC)
+
+
 @pytest.mark.parametrize("value", ["2026/08/01", "not-a-date"])
 def test_parse_search_dates_rejects_invalid_format(value: str) -> None:
     with pytest.raises(ValueError, match="YYYY-MM-DD"):

@@ -115,8 +115,12 @@ def format_search_date(
     local_timezone: tzinfo | None = None,
 ) -> str:
     normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    zone = local_timezone or datetime.now().astimezone().tzinfo or UTC
-    return normalized.astimezone(zone).strftime("%Y-%m-%d %H:%M")
+    localized = (
+        normalized.astimezone(local_timezone)
+        if local_timezone is not None
+        else normalized.astimezone()
+    )
+    return localized.strftime("%Y-%m-%d %H:%M")
 
 
 def queue_state_text(state: SearchQueueState) -> str:
@@ -142,6 +146,7 @@ class VideoSearchPage(ttk.Frame):
         self.show_error = show_error
         self.model = SearchSelectionModel()
         self.search_future: Future[tuple[SelectableVideo, ...]] | None = None
+        self._cancel_search_request: Callable[[], None] | None = None
         self.poll_after: str | None = None
         self.generation = 0
         self._after_cancel: Callable[[], None] | None = None
@@ -349,8 +354,11 @@ class VideoSearchPage(ttk.Frame):
                 self.end_date_var.get(),
                 int(self.limit_var.get()),
             )
-            self.search_future = self.bridge.submit(operation)
+            submission = self.bridge.submit_cancellable(operation)
+            self.search_future = submission.future
+            self._cancel_search_request = submission.cancel
         except Exception as error:
+            self._cancel_search_request = None
             self._finish_search_controls()
             self.show_error(error)
             return
@@ -366,7 +374,8 @@ class VideoSearchPage(ttk.Frame):
         self.generation += 1
         if self.search_future is not None and not self.search_future.done():
             self._after_cancel = on_finished
-            self.search_future.cancel()
+            if self._cancel_search_request is not None:
+                self._cancel_search_request()
             return
         self.clear_results("已取消")
         self._finish_search_controls()
@@ -382,8 +391,10 @@ class VideoSearchPage(ttk.Frame):
                 pass
             self.poll_after = None
         if self.search_future is not None and not self.search_future.done():
-            self.search_future.cancel()
+            if self._cancel_search_request is not None:
+                self._cancel_search_request()
         self.search_future = None
+        self._cancel_search_request = None
         self._after_cancel = None
         self.model.clear()
 
@@ -414,6 +425,7 @@ class VideoSearchPage(ttk.Frame):
             )
             return
         self.search_future = None
+        self._cancel_search_request = None
         try:
             items = future.result()
         except CancelledError:

@@ -5,10 +5,10 @@ import os
 import threading
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from tg_video_downloader.config import ConfigStore
 from tg_video_downloader.diagnostics import DiagnosticReport, Doctor
@@ -53,6 +53,12 @@ T = TypeVar("T")
 STALE_HEARTBEAT_SECONDS = 15
 
 
+@dataclass(frozen=True)
+class CancellableSubmission(Generic[T]):
+    future: Future[T]
+    cancel: Callable[[], None]
+
+
 class AsyncBridge:
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -71,6 +77,44 @@ class AsyncBridge:
             coroutine.close()
             raise RuntimeError("异步桥已经关闭")
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+
+    def submit_cancellable(
+        self,
+        coroutine: Coroutine[Any, Any, T],
+    ) -> CancellableSubmission[T]:
+        if self._closed:
+            coroutine.close()
+            raise RuntimeError("异步桥已经关闭")
+        cancel_event = asyncio.Event()
+
+        async def run() -> T:
+            operation = asyncio.create_task(coroutine)
+            cancellation = asyncio.create_task(cancel_event.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (operation, cancellation),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancellation in done:
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    raise asyncio.CancelledError
+                return await operation
+            except asyncio.CancelledError:
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+                raise
+            finally:
+                cancellation.cancel()
+                await asyncio.gather(cancellation, return_exceptions=True)
+
+        future = asyncio.run_coroutine_threadsafe(run(), self._loop)
+
+        def request_cancel() -> None:
+            if not future.done():
+                self._loop.call_soon_threadsafe(cancel_event.set)
+
+        return CancellableSubmission(future=future, cancel=request_cancel)
 
     def close(self) -> None:
         if self._closed:
@@ -306,13 +350,10 @@ class GuiController:
         credentials = self.load_credentials()
         if credentials is None:
             raise ValueError("请先填写并保存账号信息")
-        timezone_value = local_timezone or datetime.now().astimezone().tzinfo
-        if timezone_value is None:
-            timezone_value = UTC
         start_utc, end_utc = parse_search_dates(
             start_text,
             end_text,
-            timezone_value,
+            local_timezone,
         )
         result_limit = validate_search_limit(limit)
         gateway = self.gateway_factory(self.paths, credentials)

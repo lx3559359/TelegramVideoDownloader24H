@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from concurrent.futures import CancelledError
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 from tg_video_downloader.gateway import AuthenticationRequiredError, QrLoginChallenge
 from tg_video_downloader.diagnostics import DiagnosticCheck, DiagnosticReport
 from tg_video_downloader.gui.app import format_doctor_summary
-from tg_video_downloader.gui.controller import GuiController
+from tg_video_downloader.gui.controller import AsyncBridge, GuiController
 from tg_video_downloader.models import (
     Credentials,
     GroupTarget,
@@ -155,6 +156,39 @@ def video_search_result(chat_id: int, message_id: int) -> VideoSearchResult:
         duration_seconds=65,
         caption="课程",
     )
+
+
+def test_cancellable_submission_finishes_cleanup_before_future_is_done() -> None:
+    bridge = AsyncBridge()
+    entered = threading.Event()
+    cleanup_started = threading.Event()
+    allow_cleanup = threading.Event()
+    cleanup_finished = threading.Event()
+
+    async def operation() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await asyncio.to_thread(allow_cleanup.wait)
+            cleanup_finished.set()
+
+    try:
+        submission = bridge.submit_cancellable(operation())
+        assert entered.wait(timeout=2)
+
+        submission.cancel()
+
+        assert cleanup_started.wait(timeout=2)
+        assert submission.future.done() is False
+        allow_cleanup.set()
+        with pytest.raises(CancelledError):
+            submission.future.result(timeout=2)
+        assert cleanup_finished.is_set()
+    finally:
+        allow_cleanup.set()
+        bridge.close()
 
 
 def test_save_credentials_and_selected_groups(tmp_path: Path) -> None:
@@ -655,6 +689,31 @@ async def test_controller_searches_selected_group_and_attaches_queue_state(
     assert call.end_utc.isoformat() == "2026-08-31T16:00:00+00:00"
     assert call.result_limit == 100
     assert gateway.connected is False
+
+
+@pytest.mark.asyncio
+async def test_controller_uses_os_local_rules_without_timezone_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+    captured: list[object] = []
+
+    def capture_dates(start_text: str, end_text: str, local_timezone):
+        captured.append(local_timezone)
+        return None, None
+
+    monkeypatch.setattr(
+        "tg_video_downloader.gui.controller.parse_search_dates",
+        capture_dates,
+    )
+
+    await controller.search_videos(-1001, "", "", "", 20)
+
+    assert captured == [None]
+    assert gateway.disconnect_calls == 1
 
 
 @pytest.mark.asyncio
