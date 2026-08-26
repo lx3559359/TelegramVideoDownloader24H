@@ -76,7 +76,7 @@ def validate_search_limit(value: int) -> int:
 
 def normalize_search_caption(value: object) -> str:
     text = " ".join(str(value or "").split())
-    return text[:120]
+    return text[:120].rstrip()
 
 
 def queue_state_for(status: JobStatus | None) -> SearchQueueState:

@@ -72,6 +72,13 @@ def test_caption_is_single_line_and_bounded() -> None:
     )
 
 
+def test_caption_truncation_does_not_leave_boundary_space() -> None:
+    normalized = normalize_search_caption("a" * 119 + " " + "b")
+
+    assert normalized == "a" * 119
+    assert normalize_search_caption(normalized) == normalized
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
