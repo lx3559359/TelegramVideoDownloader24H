@@ -42,3 +42,12 @@ def test_update_control_files_stay_inside_project(tmp_path: Path) -> None:
     assert paths.update_request.is_relative_to(paths.root)
     assert paths.update_result.is_relative_to(paths.root)
     assert paths.update_log.is_relative_to(paths.root)
+
+
+def test_search_control_files_stay_inside_runtime(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+
+    assert paths.search_endpoint == paths.runtime / "search-endpoint.json"
+    assert paths.telegram_client_lock == paths.runtime / "telegram-client.lock"
+    assert paths.search_endpoint.is_relative_to(paths.root)
+    assert paths.telegram_client_lock.is_relative_to(paths.root)

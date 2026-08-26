@@ -58,6 +58,14 @@ class ProjectPaths:
     def update_log(self) -> Path:
         return self.logs / "update.log"
 
+    @property
+    def search_endpoint(self) -> Path:
+        return self.runtime / "search-endpoint.json"
+
+    @property
+    def telegram_client_lock(self) -> Path:
+        return self.runtime / "telegram-client.lock"
+
     def assert_within_root(self, path: Path) -> Path:
         resolved = path.resolve()
         if not resolved.is_relative_to(self.root):

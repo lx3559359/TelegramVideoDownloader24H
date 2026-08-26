@@ -26,6 +26,7 @@ from tg_video_downloader.selective import (
     MAX_SEARCH_CANDIDATES,
     normalize_search_caption,
 )
+from tg_video_downloader.windows import SingleInstance
 
 
 class AuthenticationRequiredError(RuntimeError):
@@ -52,6 +53,10 @@ class TransientTelegramError(RuntimeError):
     def __init__(self, message: str, *, retry_after: int | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class TelegramSessionInUseError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -213,43 +218,100 @@ class TelethonGateway:
     ) -> None:
         paths.ensure_directories()
         credentials.validate()
-        self._client = client_factory(
-            str(paths.session),
-            credentials.api_id,
-            credentials.api_hash,
-            auto_reconnect=True,
-            connection_retries=-1,
-            retry_delay=5,
-            flood_sleep_threshold=60,
-        )
+        self._paths = paths
+        self._credentials = credentials
+        self._client_factory = client_factory
+        self._client: Any | None = None
+        self._session_guard: SingleInstance | None = None
         self._event_callback: Callable[[Any], Awaitable[None]] | None = None
         self._password_required = False
         self._qr_login: Any | None = None
 
     async def connect(self) -> None:
+        if self._client is not None:
+            return
+        guard = SingleInstance(
+            self._paths.telegram_client_lock,
+            already_running_message="Telegram 会话正在由后台使用",
+        )
         try:
-            await self._client.connect()
-        except Exception as error:
-            raise _mapped_error(error) from error
+            guard.__enter__()
+        except RuntimeError as error:
+            raise TelegramSessionInUseError(
+                "Telegram 会话正在由后台使用"
+            ) from error
+        self._session_guard = guard
+        client: Any | None = None
+        try:
+            client = self._client_factory(
+                str(self._paths.session),
+                self._credentials.api_id,
+                self._credentials.api_hash,
+                auto_reconnect=True,
+                connection_retries=-1,
+                retry_delay=5,
+                flood_sleep_threshold=60,
+            )
+            self._client = client
+            await client.connect()
+        except BaseException as error:
+            await self._release_client(client)
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            if isinstance(error, Exception):
+                raise _mapped_error(error) from error
+            raise
 
     async def disconnect(self) -> None:
+        client = self._client
+        self._client = None
+        mapped: Exception | None = None
         try:
-            await self._client.disconnect()
+            if client is not None:
+                await client.disconnect()
         except Exception as error:
-            raise _mapped_error(error) from error
+            mapped = _mapped_error(error)
         finally:
+            self._release_session_guard()
+            self._qr_login = None
+            self._password_required = False
+        if mapped is not None:
+            raise mapped
+
+    async def _release_client(self, client: Any | None) -> None:
+        self._client = None
+        try:
+            if client is not None:
+                await client.disconnect()
+        except Exception:
+            pass
+        finally:
+            self._release_session_guard()
             self._qr_login = None
             self._password_required = False
 
+    def _release_session_guard(self) -> None:
+        guard = self._session_guard
+        self._session_guard = None
+        if guard is not None:
+            guard.__exit__(None, None, None)
+
+    def _require_client(self) -> Any:
+        if self._client is None:
+            raise RuntimeError("Telegram 客户端尚未连接")
+        return self._client
+
     async def is_authorized(self) -> bool:
+        client = self._require_client()
         try:
-            return bool(await self._client.is_user_authorized())
+            return bool(await client.is_user_authorized())
         except Exception as error:
             raise _mapped_error(error) from error
 
     async def send_login_code(self, phone: str) -> None:
+        client = self._require_client()
         try:
-            await self._client.send_code_request(phone)
+            await client.send_code_request(phone)
             self._password_required = False
         except Exception as error:
             raise _mapped_error(error) from error
@@ -263,8 +325,9 @@ class TelethonGateway:
         if self._password_required:
             await self.complete_password(password or "")
             return
+        client = self._require_client()
         try:
-            await self._client.sign_in(phone=phone, code=code)
+            await client.sign_in(phone=phone, code=code)
         except errors.SessionPasswordNeededError as error:
             self._password_required = True
             if not password:
@@ -274,8 +337,9 @@ class TelethonGateway:
             raise _mapped_error(error) from error
 
     async def start_qr_login(self) -> QrLoginChallenge:
+        client = self._require_client()
         try:
-            self._qr_login = await self._client.qr_login()
+            self._qr_login = await client.qr_login()
             return self._qr_challenge()
         except Exception as error:
             raise _mapped_error(error) from error
@@ -305,15 +369,17 @@ class TelethonGateway:
     async def complete_password(self, password: str) -> None:
         if not password:
             raise AuthenticationRequiredError("需要二步验证密码")
+        client = self._require_client()
         try:
-            await self._client.sign_in(password=password)
+            await client.sign_in(password=password)
         except Exception as error:
             raise _mapped_error(error) from error
         self._password_required = False
 
     async def log_out(self) -> None:
+        client = self._require_client()
         try:
-            await self._client.log_out()
+            await client.log_out()
         except Exception as error:
             raise _mapped_error(error) from error
         self._qr_login = None
@@ -328,9 +394,10 @@ class TelethonGateway:
         )
 
     async def list_groups(self) -> tuple[GroupTarget, ...]:
+        client = self._require_client()
         groups: list[GroupTarget] = []
         try:
-            async for dialog in self._client.iter_dialogs():
+            async for dialog in client.iter_dialogs():
                 if dialog.is_group is True or dialog.is_channel is True:
                     groups.append(
                         GroupTarget(
@@ -351,9 +418,10 @@ class TelethonGateway:
         end_utc: datetime | None,
         result_limit: int,
     ) -> tuple[VideoSearchResult, ...]:
+        client = self._require_client()
         results: list[VideoSearchResult] = []
         try:
-            async for raw in self._client.iter_messages(
+            async for raw in client.iter_messages(
                 chat_id,
                 limit=MAX_SEARCH_CANDIDATES,
                 search=keyword.strip() or None,
@@ -389,18 +457,20 @@ class TelethonGateway:
         return tuple(results)
 
     def set_new_message_handler(self, handler: MessageHandler) -> None:
+        client = self._require_client()
         if self._event_callback is not None:
-            self._client.remove_event_handler(self._event_callback)
+            client.remove_event_handler(self._event_callback)
 
         async def callback(event: Any) -> None:
             await handler(normalize_message(event.message, int(event.chat_id)))
 
         self._event_callback = callback
-        self._client.add_event_handler(callback, events.NewMessage())
+        client.add_event_handler(callback, events.NewMessage())
 
     async def latest_message_id(self, chat_id: int) -> int:
+        client = self._require_client()
         try:
-            async for message in self._client.iter_messages(chat_id, limit=1):
+            async for message in client.iter_messages(chat_id, limit=1):
                 return int(message.id)
             return 0
         except Exception as error:
@@ -411,8 +481,9 @@ class TelethonGateway:
         chat_id: int,
         min_id: int,
     ) -> AsyncIterator[MessageInfo]:
+        client = self._require_client()
         try:
-            async for message in self._client.iter_messages(
+            async for message in client.iter_messages(
                 chat_id,
                 min_id=min_id,
                 reverse=True,
@@ -426,8 +497,9 @@ class TelethonGateway:
         chat_id: int,
         offset_id: int | None,
     ) -> AsyncIterator[MessageInfo]:
+        client = self._require_client()
         try:
-            async for message in self._client.iter_messages(
+            async for message in client.iter_messages(
                 chat_id,
                 offset_id=offset_id or 0,
             ):
@@ -444,8 +516,9 @@ class TelethonGateway:
         offset: int = 0,
         progress_callback: DownloadProgressCallback | None = None,
     ) -> Path:
+        client = self._require_client()
         try:
-            message = await self._client.get_messages(chat_id, ids=message_id)
+            message = await client.get_messages(chat_id, ids=message_id)
             if message is None:
                 raise PermanentMessageError("消息不存在或已被删除")
             media = getattr(message, "media", None)
@@ -458,7 +531,7 @@ class TelethonGateway:
             downloaded = offset
             unsynced = 0
             last_sync = time.monotonic()
-            stream = self._client.iter_download(
+            stream = client.iter_download(
                 media,
                 offset=offset,
                 request_size=DOWNLOAD_CHUNK_SIZE,

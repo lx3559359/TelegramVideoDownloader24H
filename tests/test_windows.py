@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,6 +95,53 @@ def test_single_instance_supports_context_specific_error_message(tmp_path: Path)
                 already_running_message="配置器已经在运行",
             ):
                 pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows byte-lock behavior")
+def test_single_instance_lock_recovers_after_child_process_exit(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "telegram-client.lock"
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from tg_video_downloader.windows import SingleInstance\n"
+        "with SingleInstance(Path(sys.argv[1])):\n"
+        "    print('ready', flush=True)\n"
+        "    sys.stdin.read()\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(lock_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "ready"
+        with pytest.raises(RuntimeError, match="Telegram 会话正在由后台使用"):
+            with windows.SingleInstance(
+                lock_path,
+                already_running_message="Telegram 会话正在由后台使用",
+            ):
+                raise AssertionError("parent must not acquire a live child lock")
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+        for stream in (child.stdin, child.stdout, child.stderr):
+            if stream is not None:
+                stream.close()
+
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            with windows.SingleInstance(lock_path):
+                break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def test_downloader_running_detects_real_single_instance_lock(tmp_path: Path) -> None:

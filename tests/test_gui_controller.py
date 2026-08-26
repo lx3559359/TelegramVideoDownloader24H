@@ -8,7 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from tg_video_downloader.gateway import AuthenticationRequiredError, QrLoginChallenge
+from tg_video_downloader.gateway import (
+    AuthenticationRequiredError,
+    QrLoginChallenge,
+    TelegramSessionInUseError,
+)
 from tg_video_downloader.diagnostics import DiagnosticCheck, DiagnosticReport
 from tg_video_downloader.gui.app import format_doctor_summary
 from tg_video_downloader.gui.controller import AsyncBridge, GuiController
@@ -21,6 +25,7 @@ from tg_video_downloader.models import (
 )
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.search_ipc import SearchChannelError, SearchRequest
 from tg_video_downloader.selective import (
     ManualQueueSummary,
     SearchQueueState,
@@ -127,15 +132,43 @@ class FakeProcessControl:
         self.actions.append("stop")
 
 
-def make_controller(tmp_path: Path):
+class RecordingSearchClient:
+    def __init__(
+        self,
+        items: tuple[SelectableVideo, ...] = (),
+        error: Exception | None = None,
+    ) -> None:
+        self.items = items
+        self.error = error
+        self.calls: list[tuple[SearchRequest, int | None]] = []
+
+    async def search_videos(
+        self,
+        request: SearchRequest,
+        *,
+        expected_pid: int | None,
+    ) -> tuple[SelectableVideo, ...]:
+        self.calls.append((request, expected_pid))
+        if self.error is not None:
+            raise self.error
+        return self.items
+
+
+def make_controller(
+    tmp_path: Path,
+    *,
+    search_client: RecordingSearchClient | None = None,
+    background_running=None,
+):
     paths = ProjectPaths.from_root(tmp_path)
     gateway = LoginGateway()
     process = FakeProcessControl()
-    controller = GuiController(
-        paths,
-        lambda *_: gateway,
-        process_control=process,
-    )
+    options = {"process_control": process}
+    if search_client is not None:
+        options["search_client_factory"] = lambda _paths: search_client
+    if background_running is not None:
+        options["background_running"] = background_running
+    controller = GuiController(paths, lambda *_: gateway, **options)
     return controller, paths, gateway, process
 
 
@@ -670,6 +703,107 @@ def test_format_doctor_summary_includes_all_outcome_counts() -> None:
     assert "警告：1" in summary
     assert "失败：1" in summary
     assert "doctor.json" in summary
+
+
+@pytest.mark.asyncio
+async def test_controller_uses_ipc_without_gateway_while_background_runs(
+    tmp_path: Path,
+) -> None:
+    result = video_search_result(-1001, 9)
+    item = SelectableVideo(result, SearchQueueState.AVAILABLE)
+    search_client = RecordingSearchClient((item,))
+    controller, paths, gateway, _ = make_controller(
+        tmp_path,
+        search_client=search_client,
+        background_running=lambda _paths: True,
+    )
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+    HeartbeatWriter(paths.heartbeat).write(
+        {
+            "status": "running",
+            "pid": 4321,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    controller.gateway_factory = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("background search must not create gateway")
+    )
+    controller.state_factory = lambda _path: (_ for _ in ()).throw(
+        AssertionError("IPC results already contain queue states")
+    )
+
+    items = await controller.search_videos(
+        -1001,
+        "课程",
+        "2026-08-01",
+        "2026-08-31",
+        20,
+        local_timezone=UTC,
+    )
+
+    assert items == (item,)
+    request, expected_pid = search_client.calls[0]
+    assert request.chat_id == -1001
+    assert request.keyword == "课程"
+    assert request.start_utc == datetime(2026, 8, 1, tzinfo=UTC)
+    assert request.end_utc == datetime(2026, 9, 1, tzinfo=UTC)
+    assert request.limit == 20
+    assert expected_pid == 4321
+    assert gateway.disconnect_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_controller_never_falls_back_when_background_channel_fails(
+    tmp_path: Path,
+) -> None:
+    search_client = RecordingSearchClient(
+        error=SearchChannelError("后台检索通道尚未就绪，请稍后重试")
+    )
+    controller, _, gateway, _ = make_controller(
+        tmp_path,
+        search_client=search_client,
+        background_running=lambda _paths: True,
+    )
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+    controller.gateway_factory = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("active background must not fall back to gateway")
+    )
+
+    with pytest.raises(SearchChannelError, match="尚未就绪"):
+        await controller.search_videos(-1001, "", "", "", 20)
+
+    assert len(search_client.calls) == 1
+    assert gateway.disconnect_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_controller_direct_session_race_retries_ipc_once(
+    tmp_path: Path,
+) -> None:
+    class RacingGateway(LoginGateway):
+        async def connect(self) -> None:
+            raise TelegramSessionInUseError("Telegram 会话正在由后台使用")
+
+    paths = ProjectPaths.from_root(tmp_path)
+    gateway = RacingGateway()
+    result = video_search_result(-1001, 9)
+    item = SelectableVideo(result, SearchQueueState.AVAILABLE)
+    search_client = RecordingSearchClient((item,))
+    controller = GuiController(
+        paths,
+        lambda *_: gateway,
+        search_client_factory=lambda _paths: search_client,
+        background_running=lambda _paths: False,
+    )
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+
+    assert await controller.search_videos(-1001, "", "", "", 20) == (item,)
+    assert len(search_client.calls) == 1
+    assert search_client.calls[0][1] is None
+    assert gateway.disconnect_calls == 1
 
 
 @pytest.mark.asyncio
