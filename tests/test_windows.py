@@ -93,6 +93,25 @@ def test_single_instance_supports_context_specific_error_message(tmp_path: Path)
                 pass
 
 
+def test_downloader_running_detects_real_single_instance_lock(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    lock_path = paths.runtime / "downloader.lock"
+
+    assert not windows.downloader_is_running(paths)
+    with windows.SingleInstance(lock_path):
+        assert windows.downloader_is_running(paths)
+    assert not windows.downloader_is_running(paths)
+
+
+def test_downloader_running_ignores_unlocked_stale_lock_file(tmp_path: Path) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    (paths.runtime / "downloader.lock").write_text("stale", encoding="ascii")
+
+    assert not windows.downloader_is_running(paths)
+
+
 def test_wait_for_downloader_stop_returns_after_lock_releases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

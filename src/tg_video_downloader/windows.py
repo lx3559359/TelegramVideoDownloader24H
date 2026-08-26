@@ -207,11 +207,32 @@ def _file_state(path: Path) -> tuple[int, int] | None:
 
 
 def _file_is_locked(path: Path) -> bool:
+    mode = "r+b" if os.name == "nt" else "rb"
     try:
-        with path.open("rb"):
-            pass
+        handle = path.open(mode)
     except PermissionError:
         return True
     except OSError:
         return False
+
+    with handle:
+        if os.name != "nt":
+            return False
+
+        import msvcrt
+
+        acquired = False
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            acquired = True
+        except OSError:
+            return True
+        finally:
+            if acquired:
+                try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
     return False
