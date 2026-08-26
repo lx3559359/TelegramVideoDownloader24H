@@ -1,10 +1,12 @@
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from tg_video_downloader.models import GroupTarget, JobSource, JobStatus, MessageInfo
+from tg_video_downloader.selective import ManualQueueSummary
 from tg_video_downloader.state import StateStore
 
 
@@ -254,3 +256,134 @@ def test_bind_output_root_is_first_writer_wins_and_survives_release(
 
 def test_get_job_returns_none_for_unknown_key(store: StateStore) -> None:
     assert store.get_job(-9999, 123) is None
+
+
+def test_enqueue_manual_results_is_atomic_idempotent_and_requeues_failure(
+    store: StateStore,
+    live_message: MessageInfo,
+    tmp_path: Path,
+) -> None:
+    group = GroupTarget(live_message.chat_id, "课程群", download_history=False)
+    pending = replace(live_message, message_id=20, original_name="pending.mp4")
+    completed = replace(live_message, message_id=21, original_name="done.mp4")
+    failed = replace(live_message, message_id=22, original_name="failed.mp4")
+    fresh = replace(live_message, message_id=23, original_name="fresh.mp4")
+    store.upsert_job(pending, group.title, JobSource.HISTORY)
+    store.upsert_job(completed, group.title, JobSource.HISTORY)
+    completed_job = store.get_job(group.chat_id, completed.message_id)
+    assert completed_job is not None
+    final_path = tmp_path / "done.mp4"
+    store.mark_completed(completed_job, final_path)
+    store.upsert_job(failed, group.title, JobSource.HISTORY)
+    failed_job = store.get_job(group.chat_id, failed.message_id)
+    assert failed_job is not None
+    bound = store.bind_output_root(failed_job, tmp_path / "external")
+    store.mark_permanent_error(bound, "deleted")
+
+    summary = store.enqueue_manual_results(
+        group,
+        (pending, completed, failed, fresh),
+    )
+
+    assert summary == ManualQueueSummary(
+        added=1,
+        requeued=1,
+        already_queued=1,
+        completed=1,
+    )
+    retried = store.get_job(group.chat_id, failed.message_id)
+    assert retried is not None
+    assert retried.status is JobStatus.PENDING
+    assert retried.source is JobSource.LIVE
+    assert retried.attempts == 0
+    assert retried.output_root == (tmp_path / "external").resolve()
+    protected = store.get_job(group.chat_id, completed.message_id)
+    assert protected is not None
+    assert protected.status is JobStatus.COMPLETED
+    assert protected.source is JobSource.HISTORY
+    assert protected.output_root is None
+    unchanged = store.get_job(group.chat_id, pending.message_id)
+    assert unchanged is not None
+    assert unchanged.status is JobStatus.PENDING
+    assert unchanged.source is JobSource.HISTORY
+    row = store._connection.execute(
+        "SELECT final_path FROM jobs WHERE chat_id = ? AND message_id = ?",
+        (group.chat_id, completed.message_id),
+    ).fetchone()
+    assert row is not None
+    assert row["final_path"] == str(final_path)
+
+
+def test_job_statuses_returns_only_existing_keys(
+    store: StateStore,
+    live_message: MessageInfo,
+) -> None:
+    store.upsert_job(live_message, "群", JobSource.LIVE)
+
+    statuses = store.job_statuses(
+        (
+            (live_message.chat_id, live_message.message_id),
+            (live_message.chat_id, 999),
+        )
+    )
+
+    assert statuses == {
+        (live_message.chat_id, live_message.message_id): JobStatus.PENDING
+    }
+
+
+@pytest.mark.parametrize(
+    "messages_factory",
+    [
+        lambda message: (),
+        lambda message: (message, message),
+        lambda message: (replace(message, chat_id=-2002),),
+        lambda message: (replace(message, is_animated=True),),
+        lambda message: (
+            replace(message, is_video=False, mime_type="application/pdf"),
+        ),
+    ],
+)
+def test_enqueue_manual_results_validates_before_writing(
+    store: StateStore,
+    live_message: MessageInfo,
+    messages_factory,
+) -> None:
+    before = store.job_count()
+
+    with pytest.raises(ValueError):
+        store.enqueue_manual_results(
+            GroupTarget(live_message.chat_id, "群", False),
+            tuple(messages_factory(live_message)),
+        )
+
+    assert store.job_count() == before
+
+
+def test_enqueue_manual_results_rolls_back_the_whole_batch_on_sql_error(
+    store: StateStore,
+    live_message: MessageInfo,
+) -> None:
+    first = replace(live_message, message_id=31)
+    second = replace(live_message, message_id=32)
+    store._connection.execute(
+        f"""
+        CREATE TRIGGER abort_selected_batch
+        BEFORE INSERT ON jobs
+        WHEN NEW.message_id = {second.message_id}
+        BEGIN
+            SELECT RAISE(ABORT, 'forced selected-batch failure');
+        END
+        """
+    )
+    store._connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced selected-batch failure"):
+        store.enqueue_manual_results(
+            GroupTarget(live_message.chat_id, "新群名", False),
+            (first, second),
+        )
+
+    assert store.get_job(first.chat_id, first.message_id) is None
+    assert store.get_job(second.chat_id, second.message_id) is None
+    assert store.get_group(live_message.chat_id).title == "群"

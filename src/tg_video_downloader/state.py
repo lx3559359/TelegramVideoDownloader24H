@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from tg_video_downloader.media import is_downloadable_video
 from tg_video_downloader.models import (
     DownloadJob,
     GroupTarget,
@@ -12,6 +13,7 @@ from tg_video_downloader.models import (
     JobStatus,
     MessageInfo,
 )
+from tg_video_downloader.selective import ManualQueueSummary
 
 
 SCHEMA = """
@@ -248,6 +250,117 @@ class StateStore:
                 """,
                 values,
             )
+
+    def job_statuses(
+        self,
+        keys: tuple[tuple[int, int], ...],
+    ) -> dict[tuple[int, int], JobStatus]:
+        statuses: dict[tuple[int, int], JobStatus] = {}
+        for chat_id, message_id in keys:
+            row = self._connection.execute(
+                "SELECT status FROM jobs WHERE chat_id = ? AND message_id = ?",
+                (chat_id, message_id),
+            ).fetchone()
+            if row is not None:
+                statuses[(chat_id, message_id)] = JobStatus(str(row["status"]))
+        return statuses
+
+    def enqueue_manual_results(
+        self,
+        group: GroupTarget,
+        messages: tuple[MessageInfo, ...],
+    ) -> ManualQueueSummary:
+        if not messages:
+            raise ValueError("请至少选择一个视频")
+        keys = tuple((message.chat_id, message.message_id) for message in messages)
+        if len(set(keys)) != len(keys):
+            raise ValueError("选择结果包含重复视频")
+        if any(message.chat_id != group.chat_id for message in messages):
+            raise ValueError("选择结果与目标群组或频道不一致")
+        if any(not is_downloadable_video(message) for message in messages):
+            raise ValueError("选择结果包含不可下载的视频")
+
+        counts = {
+            "added": 0,
+            "requeued": 0,
+            "already_queued": 0,
+            "completed": 0,
+        }
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO groups(chat_id, title, enabled, download_history)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    title = excluded.title,
+                    enabled = 1,
+                    download_history = excluded.download_history
+                """,
+                (group.chat_id, group.title, int(group.download_history)),
+            )
+            for message in messages:
+                row = self._connection.execute(
+                    "SELECT status FROM jobs WHERE chat_id = ? AND message_id = ?",
+                    (message.chat_id, message.message_id),
+                ).fetchone()
+                if row is None:
+                    self._connection.execute(
+                        """
+                        INSERT INTO jobs(
+                            chat_id, message_id, group_title, source, priority,
+                            status, message_date, mime_type, original_name,
+                            extension, expected_size, is_video, is_animated,
+                            is_round
+                        ) VALUES (?, ?, ?, 'live', 0, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            message.chat_id,
+                            message.message_id,
+                            group.title,
+                            _as_utc(message.date).isoformat(),
+                            message.mime_type,
+                            message.original_name,
+                            message.extension,
+                            message.size,
+                            int(message.is_video),
+                            int(message.is_animated),
+                            int(message.is_round),
+                        ),
+                    )
+                    counts["added"] += 1
+                    continue
+                status = JobStatus(str(row["status"]))
+                if status is JobStatus.COMPLETED:
+                    counts["completed"] += 1
+                elif status is JobStatus.PERMANENT_ERROR:
+                    self._connection.execute(
+                        """
+                        UPDATE jobs SET
+                            group_title = ?, source = 'live', priority = 0,
+                            status = 'pending', message_date = ?, mime_type = ?,
+                            original_name = ?, extension = ?, expected_size = ?,
+                            is_video = ?, is_animated = ?, is_round = ?,
+                            attempts = 0, next_attempt_at = NULL, error = NULL
+                        WHERE chat_id = ? AND message_id = ?
+                        """,
+                        (
+                            group.title,
+                            _as_utc(message.date).isoformat(),
+                            message.mime_type,
+                            message.original_name,
+                            message.extension,
+                            message.size,
+                            int(message.is_video),
+                            int(message.is_animated),
+                            int(message.is_round),
+                            message.chat_id,
+                            message.message_id,
+                        ),
+                    )
+                    counts["requeued"] += 1
+                else:
+                    counts["already_queued"] += 1
+        return ManualQueueSummary(**counts)
 
     def claim_next(self, now: datetime | None = None) -> DownloadJob | None:
         current_time = _as_utc(now or datetime.now(UTC)).isoformat()
