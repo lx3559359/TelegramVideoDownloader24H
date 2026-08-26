@@ -13,11 +13,20 @@ from tg_video_downloader.config import ConfigReloader, ConfigStore
 from tg_video_downloader.coordinator import ScannerCoordinator
 from tg_video_downloader.gateway import (
     AuthenticationRequiredError,
+    GroupAccessError,
     TelegramGateway,
+    TransientTelegramError,
 )
 from tg_video_downloader.models import AppConfig, Credentials
 from tg_video_downloader.observability import HeartbeatWriter, configure_logging
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.search_ipc import (
+    SearchChannelError,
+    SearchHandler,
+    SearchIpcServer,
+    SearchRequest,
+)
+from tg_video_downloader.selective import SelectableVideo, queue_state_for
 from tg_video_downloader.state import StateStore
 from tg_video_downloader.storage import effective_download_root
 from tg_video_downloader.windows import (
@@ -33,9 +42,14 @@ class DownloaderService:
         self,
         paths: ProjectPaths,
         gateway_factory: Callable[[ProjectPaths, Credentials], TelegramGateway],
+        *,
+        search_server_factory: Callable[
+            [ProjectPaths, SearchHandler], SearchIpcServer
+        ] = SearchIpcServer,
     ) -> None:
         self.paths = paths
         self.gateway_factory = gateway_factory
+        self.search_server_factory = search_server_factory
         self._config_error: str | None = None
 
     async def run(self) -> int:
@@ -84,6 +98,7 @@ class DownloaderService:
         status = "stopped"
         worker: DownloadWorker | None = None
         config_holder = [config]
+        search_server: SearchIpcServer | None = None
         try:
             worker = DownloadWorker(
                 self.paths,
@@ -102,6 +117,22 @@ class DownloaderService:
             if not await gateway.is_authorized():
                 raise AuthenticationRequiredError("Telegram 账号需要登录")
             await coordinator.start(config.groups)
+
+            async def search_handler(
+                request: SearchRequest,
+            ) -> tuple[SelectableVideo, ...]:
+                return await self._search_videos(
+                    request,
+                    state,
+                    gateway,
+                    config_holder,
+                )
+
+            search_server = self.search_server_factory(
+                self.paths,
+                search_handler,
+            )
+            await search_server.start()
 
             reloader = config_store.reloader()
             reloader.load_if_changed()
@@ -135,6 +166,11 @@ class DownloaderService:
             raise
         finally:
             stop.set()
+            if search_server is not None:
+                try:
+                    await search_server.close()
+                except Exception:
+                    logger.exception("关闭后台检索通道时发生错误")
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -147,6 +183,51 @@ class DownloaderService:
             if status == "stopped":
                 heartbeat.write(self._snapshot("stopped", state, worker=worker))
             state.close()
+
+    async def _search_videos(
+        self,
+        request: SearchRequest,
+        state: StateStore,
+        gateway: TelegramGateway,
+        config_holder: list[AppConfig],
+    ) -> tuple[SelectableVideo, ...]:
+        selected_ids = {group.chat_id for group in config_holder[0].groups}
+        if request.chat_id not in selected_ids:
+            raise SearchChannelError("只能检索当前已监听的群组或频道")
+        try:
+            results = await gateway.search_videos(
+                request.chat_id,
+                request.keyword,
+                request.start_utc,
+                request.end_utc,
+                request.limit,
+            )
+        except asyncio.CancelledError:
+            raise
+        except (
+            AuthenticationRequiredError,
+            GroupAccessError,
+            TransientTelegramError,
+            ValueError,
+        ) as error:
+            raise SearchChannelError(str(error)) from error
+        statuses = state.job_statuses(
+            tuple(
+                (result.message.chat_id, result.message.message_id)
+                for result in results
+            )
+        )
+        return tuple(
+            SelectableVideo(
+                result=result,
+                queue_state=queue_state_for(
+                    statuses.get(
+                        (result.message.chat_id, result.message.message_id)
+                    )
+                ),
+            )
+            for result in results
+        )
 
     async def _watch_config(
         self,
