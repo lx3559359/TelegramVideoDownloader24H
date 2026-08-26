@@ -16,6 +16,7 @@ from tg_video_downloader.gateway import (
     AuthenticationRequiredError,
     QrLoginChallenge,
     TelegramGateway,
+    TelegramSessionInUseError,
 )
 from tg_video_downloader.models import (
     AppConfig,
@@ -25,6 +26,11 @@ from tg_video_downloader.models import (
 )
 from tg_video_downloader.observability import HeartbeatWriter
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.search_ipc import (
+    SearchClientProtocol,
+    SearchIpcClient,
+    SearchRequest,
+)
 from tg_video_downloader.selective import (
     ManualQueueSummary,
     SelectableVideo,
@@ -166,6 +172,10 @@ class GuiController:
         *,
         process_control: ProcessControl | None = None,
         state_factory: Callable[[Path], StateStore] = StateStore,
+        search_client_factory: Callable[
+            [ProjectPaths], SearchClientProtocol
+        ] = SearchIpcClient,
+        background_running: Callable[[ProjectPaths], bool] = downloader_is_running,
     ) -> None:
         self.paths = paths
         self.paths.ensure_directories()
@@ -173,6 +183,8 @@ class GuiController:
         self.gateway_factory = gateway_factory
         self.process_control = process_control or WindowsProcessControl()
         self.state_factory = state_factory
+        self.search_client_factory = search_client_factory
+        self.background_running = background_running
         self._login_gateway: TelegramGateway | None = None
         self._login_credentials: Credentials | None = None
         self.update_manager: UpdateManager | None = None
@@ -358,6 +370,25 @@ class GuiController:
             local_timezone,
         )
         result_limit = validate_search_limit(limit)
+        request = SearchRequest(
+            chat_id=chat_id,
+            keyword=keyword,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            limit=result_limit,
+        )
+        if self.background_running(self.paths):
+            return await self._search_videos_background(request)
+        try:
+            return await self._search_videos_direct(credentials, request)
+        except TelegramSessionInUseError:
+            return await self._search_videos_background(request)
+
+    async def _search_videos_direct(
+        self,
+        credentials: Credentials,
+        request: SearchRequest,
+    ) -> tuple[SelectableVideo, ...]:
         gateway = self.gateway_factory(self.paths, credentials)
         active_error: BaseException | None = None
         try:
@@ -365,11 +396,11 @@ class GuiController:
             if not await gateway.is_authorized():
                 raise AuthenticationRequiredError("请先完成 Telegram 登录")
             results = await gateway.search_videos(
-                chat_id,
-                keyword,
-                start_utc,
-                end_utc,
-                result_limit,
+                request.chat_id,
+                request.keyword,
+                request.start_utc,
+                request.end_utc,
+                request.limit,
             )
         except BaseException as error:
             active_error = error
@@ -381,6 +412,27 @@ class GuiController:
                 if active_error is None:
                     raise
         return await asyncio.to_thread(self._attach_queue_states, results)
+
+    async def _search_videos_background(
+        self,
+        request: SearchRequest,
+    ) -> tuple[SelectableVideo, ...]:
+        client = self.search_client_factory(self.paths)
+        return await client.search_videos(
+            request,
+            expected_pid=self._running_heartbeat_pid(),
+        )
+
+    def _running_heartbeat_pid(self) -> int | None:
+        snapshot = self.read_status()
+        pid = snapshot.get("pid")
+        if (
+            snapshot.get("status") == "running"
+            and isinstance(pid, int)
+            and not isinstance(pid, bool)
+        ):
+            return pid
+        return None
 
     def _attach_queue_states(
         self,
