@@ -78,6 +78,13 @@ class MessageInfo:
 
 
 @dataclass(frozen=True)
+class VideoSearchResult:
+    message: MessageInfo
+    duration_seconds: int | None
+    caption: str
+
+
+@dataclass(frozen=True)
 class DownloadJob:
     chat_id: int
     message_id: int
