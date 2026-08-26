@@ -57,7 +57,7 @@ v0.3.3 已避免配置器启动时为了恢复登录状态而重复打开 Teleth
 
 ### Telegram 会话所有权
 
-`TelethonGateway.connect()` 在首次打开客户端前获取 `telegram-client.lock`，并持有到 `disconnect()` 完成。连接失败时立即释放；断开失败时也在 `finally` 中释放。重复连接或断开保持幂等。
+当前 `TelethonGateway.__init__()` 会立刻构造 `TelegramClient`，而 Telethon 在构造文件会话时已经可能打开 SQLite。实现必须改为延迟创建：构造函数只保存路径、凭据、客户端工厂和连接选项；`connect()` 先获取 `telegram-client.lock`，成功后才调用客户端工厂并连接。锁持有到 `disconnect()` 完成。客户端创建或连接失败时立即释放；断开失败时也在 `finally` 中释放。重复连接或断开保持幂等。
 
 无法获取锁时抛出明确的会话占用错误，不调用 Telethon，也不打开 SQLite。这样即使后台启动和配置器直连发生竞态，也不会再落入 SQLite 的 `database is locked`。
 
@@ -155,6 +155,7 @@ IPC 服务使用当前 asyncio 事件循环和 `asyncio.start_server()`，不创
 ### 会话所有权测试
 
 - 第一个真实网关连接前获取字节锁，断开后释放。
+- 构造真实网关不会调用客户端工厂，也不会打开会话；第一次 `connect()` 才在持锁状态下创建客户端。
 - 连接失败和断开失败均释放锁。
 - 第二个网关在 Telethon 客户端启动前得到明确占用错误。
 - Windows 子进程验证进程退出后锁自动恢复。
