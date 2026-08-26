@@ -11,7 +11,11 @@ import pytest
 
 from tg_video_downloader.models import MessageInfo, VideoSearchResult
 from tg_video_downloader.paths import ProjectPaths
-from tg_video_downloader.selective import SearchQueueState, SelectableVideo
+from tg_video_downloader.selective import (
+    SearchQueueState,
+    SelectableVideo,
+    normalize_search_caption,
+)
 
 
 def _ipc():
@@ -123,6 +127,17 @@ def test_response_json_round_trip_preserves_message_and_queue_state() -> None:
 
     assert not raw.endswith(b"\n")
     assert ipc.decode_response(raw) == items
+
+
+def test_response_round_trip_accepts_caption_truncated_at_word_boundary() -> None:
+    ipc = _ipc()
+    item = _item(
+        caption=normalize_search_caption("a" * 119 + " " + "b")
+    )
+
+    raw = ipc.encode_success((item,))
+
+    assert ipc.decode_response(raw) == (item,)
 
 
 def test_response_error_becomes_stable_channel_error() -> None:
