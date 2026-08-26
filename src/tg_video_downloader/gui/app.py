@@ -249,6 +249,13 @@ class DownloaderApp(ttk.Frame):
         )
         self.qr_cancel_button.pack(side="left")
         self.qr_cancel_button.state(["disabled"])
+        self.session_retry_button = ttk.Button(
+            self.qr_actions,
+            text="重试恢复",
+            command=self._check_saved_session,
+        )
+        self.session_retry_button.pack(side="left", padx=(8, 0))
+        self.session_retry_button.pack_forget()
 
         self.qr_password_frame = ttk.Frame(page)
         self.qr_password_frame.grid(
@@ -671,6 +678,7 @@ class DownloaderApp(ttk.Frame):
 
     def _check_saved_session(self) -> None:
         generation = self._qr_generation
+        self._hide_session_retry()
         self.account_status_var.set("正在恢复已有登录会话")
         self.qr_login_button.state(["disabled"])
         self._run_qr_operation(
@@ -690,17 +698,28 @@ class DownloaderApp(ttk.Frame):
     ) -> None:
         if not self._is_current_qr_generation(generation):
             return
+        self._hide_session_retry()
         self._finish_qr_login("登录成功" if authorized else "尚未登录")
 
     def _handle_saved_session_error(
         self,
-        _error: Exception,
+        error: Exception,
         generation: int,
     ) -> None:
         if not self._is_current_qr_generation(generation):
             return
+        safe_message = self._safe_error(error)
         self._finish_qr_login("尚未登录")
-        self.account_status_var.set("暂时无法检查已有会话，可稍后重试")
+        self.account_status_var.set(f"恢复失败：{safe_message}")
+        self._show_session_retry()
+
+    def _hide_session_retry(self) -> None:
+        self.session_retry_button.state(["disabled"])
+        self.session_retry_button.pack_forget()
+
+    def _show_session_retry(self) -> None:
+        self.session_retry_button.state(["!disabled"])
+        self.session_retry_button.pack(side="left", padx=(8, 0))
 
     def _credentials_from_form(self) -> Credentials:
         return Credentials(
@@ -730,6 +749,7 @@ class DownloaderApp(ttk.Frame):
     def _begin_qr_login(self, generation: int) -> None:
         if not self._is_current_qr_generation(generation):
             return
+        self._hide_session_retry()
         try:
             credentials = self._credentials_from_form()
         except Exception as error:
@@ -988,6 +1008,7 @@ class DownloaderApp(ttk.Frame):
             self.qr_cancel_button.state(["disabled"])
 
     def _finish_qr_login(self, status: str) -> None:
+        self._hide_session_retry()
         self._cancel_qr_callbacks()
         self._qr_expires_at = None
         self._qr_retry_attempt = 0

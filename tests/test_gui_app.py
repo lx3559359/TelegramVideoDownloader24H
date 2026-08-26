@@ -30,12 +30,19 @@ class FakeButton:
     def __init__(self) -> None:
         self.text = ""
         self.states: list[str] = []
+        self.visible = False
 
     def configure(self, **values: str) -> None:
         self.text = values["text"]
 
     def state(self, values: list[str]) -> None:
         self.states = values
+
+    def pack(self, **_values) -> None:
+        self.visible = True
+
+    def pack_forget(self) -> None:
+        self.visible = False
 
 
 class FakeVar:
@@ -120,38 +127,81 @@ def test_saved_session_status_restores_authorized_account_without_qr() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False
     app._qr_generation = 4
+    app.session_retry_button = FakeButton()
+    app.session_retry_button.pack()
     finished: list[str] = []
     app._finish_qr_login = finished.append
 
     app._handle_saved_session_status(True, 4)
 
     assert finished == ["登录成功"]
+    assert app.session_retry_button.visible is False
 
 
 def test_saved_session_status_leaves_manual_login_available_when_unauthorized() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False
     app._qr_generation = 4
+    app.session_retry_button = FakeButton()
+    app.session_retry_button.pack()
     finished: list[str] = []
     app._finish_qr_login = finished.append
 
     app._handle_saved_session_status(False, 4)
 
     assert finished == ["尚未登录"]
+    assert app.session_retry_button.visible is False
 
 
-def test_saved_session_probe_error_keeps_session_and_shows_generic_status() -> None:
+def test_saved_session_probe_error_shows_redacted_reason_and_retry() -> None:
     app = object.__new__(DownloaderApp)
     app._closed = False
     app._qr_generation = 4
     app.account_status_var = FakeVar()
+    app.api_hash_var = FakeVar("secret-hash")
+    app.phone_var = FakeVar("")
+    app.code_var = FakeVar("")
+    app.password_var = FakeVar("")
+    app.qr_password_var = FakeVar("")
+    app.session_retry_button = FakeButton()
     finished: list[str] = []
     app._finish_qr_login = finished.append
 
-    app._handle_saved_session_error(RuntimeError("private network detail"), 4)
+    app._handle_saved_session_error(
+        RuntimeError("secret-hash database is locked"),
+        4,
+    )
 
     assert finished == ["尚未登录"]
-    assert app.account_status_var.get() == "暂时无法检查已有会话，可稍后重试"
+    assert app.account_status_var.get() == "恢复失败：*** database is locked"
+    assert app.session_retry_button.visible is True
+    assert app.session_retry_button.states == ["!disabled"]
+
+
+def test_saved_session_retry_restarts_probe_and_hides_after_success() -> None:
+    app = object.__new__(DownloaderApp)
+    app._closed = False
+    app._qr_generation = 4
+    app.account_status_var = FakeVar()
+    app.qr_login_button = FakeButton()
+    app.session_retry_button = FakeButton()
+    app.session_retry_button.pack()
+    app.controller = SimpleNamespace(saved_session_authorized=lambda: "session-probe")
+    finished: list[str] = []
+    app._finish_qr_login = finished.append
+
+    def run_operation(operation, generation, on_success, _on_error) -> None:
+        assert operation == "session-probe"
+        assert generation == 4
+        on_success(True)
+
+    app._run_qr_operation = run_operation
+
+    app._check_saved_session()
+
+    assert finished == ["登录成功"]
+    assert app.qr_login_button.states == ["disabled"]
+    assert app.session_retry_button.visible is False
 
 
 def test_start_service_sets_and_publishes_starting_status() -> None:
