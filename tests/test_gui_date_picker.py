@@ -39,18 +39,6 @@ def test_shift_month_crosses_year_boundaries() -> None:
     assert shift_month(2026, 1, -1) == (2025, 12)
 
 
-@pytest.fixture(scope="module")
-def tk_root():
-    root = tk.Tk()
-    root.geometry("900x720")
-    root.update_idletasks()
-    try:
-        yield root
-    finally:
-        root.update_idletasks()
-        root.destroy()
-
-
 def make_picker(root: tk.Tk) -> DatePicker:
     picker = DatePicker(
         root,

@@ -196,17 +196,6 @@ def test_queue_state_text_is_user_facing(
     assert queue_state_text(state) == expected
 
 
-@pytest.fixture(scope="module")
-def tk_root():
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        yield root
-    finally:
-        root.update_idletasks()
-        root.destroy()
-
-
 class FakeSearchController:
     def __init__(self) -> None:
         self.groups = (GroupTarget(-1001, "课程群", False),)
