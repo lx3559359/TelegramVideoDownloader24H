@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -757,6 +758,40 @@ async def test_controller_preserves_search_error_when_disconnect_also_fails(
 
     with pytest.raises(RuntimeError, match="search failed"):
         await controller.search_videos(-1001, "", "", "", 20)
+
+
+@pytest.mark.asyncio
+async def test_controller_search_does_not_log_keyword_caption_or_filename(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    controller, _, gateway, _ = make_controller(tmp_path)
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GroupTarget(-1001, "课程群", False),))
+    result = video_search_result(-1001, 60)
+    private_caption = "private-caption-unique"
+    private_name = "private-file-unique.mp4"
+    private_keyword = "private-keyword-unique"
+    gateway.search_results = (
+        replace(
+            result,
+            message=replace(result.message, original_name=private_name),
+            caption=private_caption,
+        ),
+    )
+
+    await controller.search_videos(
+        -1001,
+        private_keyword,
+        "",
+        "",
+        20,
+        local_timezone=UTC,
+    )
+
+    assert private_keyword not in caplog.text
+    assert private_caption not in caplog.text
+    assert private_name not in caplog.text
 
 
 def test_controller_enqueues_selected_results_and_rechecks_target(

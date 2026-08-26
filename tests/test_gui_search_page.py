@@ -346,6 +346,36 @@ def test_search_page_cancellation_runs_cleanup_callback_without_partial_rows(
     page.close()
 
 
+def test_search_page_discards_result_when_running_future_cannot_cancel(
+    tk_root: tk.Tk,
+) -> None:
+    notebook = ttk.Notebook(tk_root)
+    bridge = FakeSearchBridge()
+    assert bridge.future.set_running_or_notify_cancel() is True
+    page = VideoSearchPage(
+        notebook,
+        controller=FakeSearchController(),
+        bridge=bridge,
+        show_error=lambda _error: None,
+    )
+    callbacks, _ = install_fake_scheduler(page)
+    finished: list[bool] = []
+    page.start_search()
+    page.cancel_search(on_finished=lambda: finished.append(True))
+    bridge.future.set_result(
+        (make_selectable_item(SearchQueueState.AVAILABLE, message_id=8),)
+    )
+
+    callback = next(iter(callbacks.values()))
+    callback()
+
+    assert page.result_tree.get_children() == ()
+    assert page.status_var.get() == "已取消"
+    assert finished == [True]
+    assert page.poll_after is None
+    page.close()
+
+
 def test_search_page_selects_and_enqueues_without_starting_service(
     tk_root: tk.Tk,
 ) -> None:

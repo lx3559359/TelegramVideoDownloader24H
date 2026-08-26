@@ -426,6 +426,8 @@ class VideoSearchPage(ttk.Frame):
                 self.model.replace(items)
                 self._render_results()
                 self.status_var.set(f"检索完成，共 {len(items)} 条")
+            else:
+                self.clear_results("已取消")
         finally:
             self._finish_search_controls()
             callback, self._after_cancel = self._after_cancel, None

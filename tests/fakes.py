@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tg_video_downloader.models import GroupTarget, MessageInfo
+from tg_video_downloader.models import GroupTarget, MessageInfo, VideoSearchResult
 
 
 class FakeTelegramGateway:
@@ -16,12 +16,16 @@ class FakeTelegramGateway:
         self.handler = None
         self.authorized = True
         self.connected = False
+        self.disconnect_calls = 0
+        self.search_results: tuple[VideoSearchResult, ...] = ()
+        self.search_calls: list[tuple[object, ...]] = []
 
     async def connect(self) -> None:
         self.connected = True
 
     async def disconnect(self) -> None:
         self.connected = False
+        self.disconnect_calls += 1
 
     async def is_authorized(self) -> bool:
         return self.authorized
@@ -57,6 +61,23 @@ class FakeTelegramGateway:
             GroupTarget(chat_id, f"群 {chat_id}", download_history=False)
             for chat_id in sorted(self.messages)
         )
+
+    async def search_videos(
+        self,
+        chat_id: int,
+        keyword: str,
+        start_utc,
+        end_utc,
+        result_limit: int,
+    ) -> tuple[VideoSearchResult, ...]:
+        self.search_calls.append(
+            (chat_id, keyword, start_utc, end_utc, result_limit)
+        )
+        return tuple(
+            result
+            for result in self.search_results
+            if result.message.chat_id == chat_id
+        )[:result_limit]
 
     def set_new_message_handler(self, handler) -> None:
         self.handler = handler

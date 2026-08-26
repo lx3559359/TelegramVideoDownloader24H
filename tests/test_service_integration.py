@@ -7,12 +7,15 @@ import pytest
 from tg_video_downloader.config import ConfigStore
 from tg_video_downloader.coordinator import ScannerCoordinator
 from tg_video_downloader.gateway import DOWNLOAD_CHUNK_SIZE, TransientTelegramError
+from tg_video_downloader.gui.controller import GuiController
 from tg_video_downloader.models import (
     AppConfig,
     Credentials,
     GroupTarget,
     JobSource,
+    JobStatus,
     MessageInfo,
+    VideoSearchResult,
 )
 from tg_video_downloader.naming import build_final_path
 from tg_video_downloader.paths import ProjectPaths
@@ -52,6 +55,147 @@ def gateway_with(messages: dict[int, list[MessageInfo]]) -> FakeTelegramGateway:
                 f"video-{message.chat_id}-{message.message_id}".encode()
             )
     return gateway
+
+
+def search_result(message: MessageInfo) -> VideoSearchResult:
+    return VideoSearchResult(
+        message=message,
+        duration_seconds=65,
+        caption="课程",
+    )
+
+
+@pytest.mark.asyncio
+async def test_selected_search_result_uses_existing_worker_and_current_root(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    paths.ensure_directories()
+    selected = video(GROUP_A.chat_id, 77, payload=b"video")
+    gateway = FakeTelegramGateway()
+    gateway.search_results = (search_result(selected),)
+    gateway.download_payloads[(selected.chat_id, selected.message_id)] = b"video"
+    controller = GuiController(paths, lambda *_: gateway)
+    controller.save_credentials(Credentials(123, "hash"))
+    controller.save_selected_groups((GROUP_A,))
+    state = StateStore(paths.database)
+    try:
+        found = await controller.search_videos(
+            GROUP_A.chat_id,
+            "",
+            "",
+            "",
+            20,
+            local_timezone=UTC,
+        )
+        summary = controller.enqueue_selected_videos(
+            GROUP_A.chat_id,
+            tuple(item.result for item in found),
+        )
+        worker = DownloadWorker(
+            paths,
+            state,
+            gateway,
+            download_root=lambda: paths.downloads,
+        )
+
+        assert await worker.run_one() == "completed"
+        job = state.get_job(GROUP_A.chat_id, selected.message_id)
+        assert summary.added == 1
+        assert job is not None and job.status is JobStatus.COMPLETED
+        assert gateway.downloaded_keys == [
+            (GROUP_A.chat_id, selected.message_id)
+        ]
+    finally:
+        state.close()
+
+
+def test_selected_job_waits_for_current_file_then_precedes_history(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path)
+    state = StateStore(paths.database)
+    current = video(GROUP_A.chat_id, 90)
+    selected = video(GROUP_A.chat_id, 80)
+    history = video(GROUP_A.chat_id, 100)
+    try:
+        state.reconcile_targets((GROUP_A,))
+        state.upsert_job(current, GROUP_A.title, JobSource.LIVE)
+        active = state.claim_next()
+        assert active is not None and active.message_id == current.message_id
+        state.upsert_job(history, GROUP_A.title, JobSource.HISTORY)
+
+        state.enqueue_manual_results(GROUP_A, (selected,))
+
+        still_active = state.get_job(GROUP_A.chat_id, current.message_id)
+        assert still_active is not None
+        assert still_active.status is JobStatus.DOWNLOADING
+        state.mark_completed(active, tmp_path / "current.mp4")
+        next_job = state.claim_next()
+        assert next_job is not None
+        assert next_job.message_id == selected.message_id
+        assert next_job.source is JobSource.LIVE
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_requeued_selected_failure_preserves_root_and_partial(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.from_root(tmp_path / "project")
+    paths.ensure_directories()
+    external = (tmp_path / "external").resolve()
+    external.mkdir(parents=True)
+    payload = b"a" * DOWNLOAD_CHUNK_SIZE + b"rest"
+    selected = video(GROUP_A.chat_id, 78, payload=payload)
+    gateway = FakeTelegramGateway()
+    gateway.download_payloads[(selected.chat_id, selected.message_id)] = payload
+    controller = GuiController(paths, lambda *_: gateway)
+    controller.save_selected_groups((GROUP_A,))
+    state = StateStore(paths.database)
+    try:
+        state.reconcile_targets((GROUP_A,))
+        state.upsert_job(selected, GROUP_A.title, JobSource.HISTORY)
+        failed = state.get_job(selected.chat_id, selected.message_id)
+        assert failed is not None
+        bound = state.bind_output_root(failed, external)
+        state.mark_permanent_error(bound, "deleted")
+        partial = build_part_path(
+            external,
+            selected.chat_id,
+            selected.message_id,
+        )
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_bytes(payload[:DOWNLOAD_CHUNK_SIZE])
+
+        summary = controller.enqueue_selected_videos(
+            GROUP_A.chat_id,
+            (search_result(selected),),
+        )
+        worker = DownloadWorker(
+            paths,
+            state,
+            gateway,
+            download_root=lambda: tmp_path / "new-root",
+        )
+
+        assert summary.requeued == 1
+        assert await worker.run_one() == "completed"
+        completed = state.get_job(selected.chat_id, selected.message_id)
+        assert completed is not None
+        assert completed.output_root == external
+        assert gateway.download_offsets == [DOWNLOAD_CHUNK_SIZE]
+        final_path = build_final_path(
+            paths,
+            GROUP_A.title,
+            selected,
+            download_root=external,
+        )
+        assert final_path.read_bytes() == payload
+        assert not partial.exists()
+    finally:
+        state.close()
 
 
 @pytest.mark.asyncio
