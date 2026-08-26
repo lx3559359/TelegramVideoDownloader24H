@@ -463,6 +463,26 @@ async def test_qr_login_reuses_authorized_session(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_saved_session_uses_fresh_running_heartbeat_without_gateway(
+    tmp_path: Path,
+) -> None:
+    controller, paths, gateway, _ = make_controller(tmp_path)
+    controller.save_credentials(Credentials(12345, "hash"))
+    controller.gateway_factory = lambda *_: (_ for _ in ()).throw(
+        AssertionError("healthy background must not open the shared session")
+    )
+    HeartbeatWriter(paths.heartbeat).write(
+        {
+            "status": "running",
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    )
+
+    assert await controller.saved_session_authorized() is True
+    assert gateway.disconnect_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_saved_session_probe_reuses_authorization_without_starting_login(
     tmp_path: Path,
 ) -> None:
@@ -472,6 +492,7 @@ async def test_saved_session_probe_reuses_authorization_without_starting_login(
 
     assert await controller.saved_session_authorized() is True
     assert gateway.connected is False
+    assert gateway.disconnect_calls == 1
     assert controller.login_active is False
 
 

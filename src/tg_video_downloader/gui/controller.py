@@ -194,6 +194,8 @@ class GuiController:
         credentials = self.load_credentials()
         if credentials is None:
             return False
+        if self.read_status().get("status") == "running":
+            return True
         gateway = self.gateway_factory(self.paths, credentials)
         try:
             await gateway.connect()
