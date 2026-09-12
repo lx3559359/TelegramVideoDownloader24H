@@ -12,6 +12,7 @@ from typing import Any
 from tg_video_downloader.gui.controller import AsyncBridge, GuiController
 from tg_video_downloader.gui.date_picker import DatePicker
 from tg_video_downloader.models import GroupTarget, VideoSearchResult
+from tg_video_downloader.naming import collection_directory
 from tg_video_downloader.selective import (
     SearchQueueState,
     SelectableVideo,
@@ -241,6 +242,8 @@ class VideoSearchPage(ttk.Frame):
             self,
             columns=(
                 "selected",
+                "title",
+                "folder",
                 "date",
                 "name",
                 "size",
@@ -253,6 +256,8 @@ class VideoSearchPage(ttk.Frame):
         )
         headings = {
             "selected": "选择",
+            "title": "识别片名",
+            "folder": "保存分组",
             "date": "消息日期",
             "name": "文件名",
             "size": "大小",
@@ -262,6 +267,8 @@ class VideoSearchPage(ttk.Frame):
         }
         widths = {
             "selected": 54,
+            "title": 160,
+            "folder": 160,
             "date": 125,
             "name": 180,
             "size": 82,
@@ -289,11 +296,14 @@ class VideoSearchPage(ttk.Frame):
         )
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.result_tree.configure(yscrollcommand=scrollbar.set)
+        horizontal = ttk.Scrollbar(self, orient="horizontal", command=self.result_tree.xview)
+        horizontal.grid(row=2, column=0, sticky="ew")
+        self.result_tree.configure(xscrollcommand=horizontal.set)
         self.result_tree.bind("<Double-1>", self._toggle_row)
         self.result_tree.bind("<space>", self._toggle_focused_row)
 
         footer = ttk.Frame(self)
-        footer.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        footer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(footer, textvariable=self.status_var).pack(side="left")
         ttk.Label(footer, textvariable=self.count_var).pack(
             side="left",
@@ -486,6 +496,12 @@ class VideoSearchPage(ttk.Frame):
                 iid=str(message.message_id),
                 values=(
                     marker,
+                    message.collection_title or "未识别",
+                    (
+                        collection_directory(message)
+                        if item.queue_state is SearchQueueState.AVAILABLE
+                        else "已有任务，以原目录为准"
+                    ),
                     format_search_date(message.date),
                     message.original_name or fallback_name,
                     format_search_size(message.size),

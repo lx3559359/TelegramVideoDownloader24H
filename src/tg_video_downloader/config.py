@@ -132,23 +132,23 @@ class ConfigStore:
 class ConfigReloader:
     def __init__(self, store: ConfigStore) -> None:
         self._store = store
-        self._observed_mtime_ns: int | None = None
+        self._observed_content: bytes | None = None
         self._initialized = False
         self._last_valid: AppConfig | None = None
         self.last_error: str | None = None
 
     def load_if_changed(self) -> AppConfig | None:
         try:
-            mtime_ns = self._store.paths.config.stat().st_mtime_ns
+            content = self._store.paths.config.read_bytes()
         except OSError as error:
             self.last_error = str(error)
             return self._last_valid
 
-        if self._initialized and mtime_ns == self._observed_mtime_ns:
+        if self._initialized and content == self._observed_content:
             return None
 
         self._initialized = True
-        self._observed_mtime_ns = mtime_ns
+        self._observed_content = content
         try:
             config = self._store.load_config()
         except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:

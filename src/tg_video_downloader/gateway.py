@@ -22,11 +22,15 @@ from tg_video_downloader.models import (
     VideoSearchResult,
 )
 from tg_video_downloader.paths import ProjectPaths
+from tg_video_downloader.titles import extract_title
+from dataclasses import replace
 from tg_video_downloader.selective import (
     MAX_SEARCH_CANDIDATES,
     normalize_search_caption,
 )
 from tg_video_downloader.windows import SingleInstance
+
+COLLECTION_LOOKUP_TIMEOUT = 10.0
 
 
 class AuthenticationRequiredError(RuntimeError):
@@ -183,6 +187,8 @@ def normalize_message(message: Any, chat_id: int) -> MessageInfo:
         date=message.date,
         mime_type=mime_type,
         original_name=original_name,
+        collection_title=extract_title(getattr(message, "message", None)),
+        grouped_id=getattr(message, "grouped_id", None),
         extension=extension or "",
         size=size,
         is_video=is_video,
@@ -454,7 +460,47 @@ class TelethonGateway:
             raise
         except Exception as error:
             raise _mapped_error(error) from error
-        return tuple(results)
+        # Reuse captions already fetched by this search. Per-video album RPCs
+        # can be rate-limited and used to block the entire result list.
+        album_titles: dict[int, set[str]] = {}
+        for result in results:
+            message = result.message
+            if message.grouped_id is not None and message.collection_title:
+                album_titles.setdefault(message.grouped_id, set()).add(message.collection_title)
+        resolved: list[VideoSearchResult] = []
+        for result in results:
+            message = result.message
+            titles = album_titles.get(message.grouped_id, set())
+            if not message.collection_title and len(titles) == 1:
+                result = replace(result, message=replace(message, collection_title=next(iter(titles))))
+            resolved.append(result)
+        return tuple(resolved)
+
+    async def resolve_collection(self, message: MessageInfo) -> MessageInfo:
+        if message.collection_title or message.grouped_id is None:
+            return message
+        client = self._require_client()
+        # Nearby IDs only bound the lookup; membership requires the exact album ID.
+        try:
+            siblings = await asyncio.wait_for(
+                client.get_messages(
+                    message.chat_id,
+                    ids=list(range(max(1, message.message_id - 10), message.message_id + 11)),
+                ),
+                timeout=COLLECTION_LOOKUP_TIMEOUT,
+            )
+        except Exception:
+            # Optional enrichment must never prevent an otherwise valid video
+            # from being queued. Task cancellation still propagates.
+            return message
+        titles = {
+            title for sibling in siblings
+            if getattr(sibling, "grouped_id", None) == message.grouped_id
+            if (title := extract_title(getattr(sibling, "message", None)))
+        }
+        if len(titles) == 1:
+            return replace(message, collection_title=titles.pop())
+        return message
 
     def set_new_message_handler(self, handler: MessageHandler) -> None:
         client = self._require_client()
@@ -488,7 +534,7 @@ class TelethonGateway:
                 min_id=min_id,
                 reverse=True,
             ):
-                yield normalize_message(message, chat_id)
+                yield await self.resolve_collection(normalize_message(message, chat_id))
         except Exception as error:
             raise _mapped_error(error) from error
 
@@ -503,7 +549,7 @@ class TelethonGateway:
                 chat_id,
                 offset_id=offset_id or 0,
             ):
-                yield normalize_message(message, chat_id)
+                yield await self.resolve_collection(normalize_message(message, chat_id))
         except Exception as error:
             raise _mapped_error(error) from error
 

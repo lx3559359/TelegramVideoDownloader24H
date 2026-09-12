@@ -272,6 +272,7 @@ def _message_payload(message: MessageInfo) -> dict[str, Any]:
         "date": message.date.isoformat(),
         "mime_type": message.mime_type,
         "original_name": message.original_name,
+        "collection_title": message.collection_title,
         "extension": message.extension,
         "size": message.size,
         "is_video": message.is_video,
@@ -283,6 +284,10 @@ def _message_payload(message: MessageInfo) -> dict[str, Any]:
 def _message_from_payload(payload: Any) -> MessageInfo:
     if not isinstance(payload, dict):
         raise SearchChannelError("消息字段无效")
+    payload = dict(payload)
+    collection_title = _optional_string(payload.pop("collection_title", None), label="片名")
+    if collection_title is not None and len(collection_title) > 120:
+        raise SearchChannelError("片名不能超过 120 字符")
     _require_exact_keys(
         payload,
         {
@@ -310,6 +315,7 @@ def _message_from_payload(payload: Any) -> MessageInfo:
             minimum=1,
         ),
         date=parsed_date,
+        collection_title=collection_title,
         mime_type=_optional_string(payload["mime_type"], label="MIME 类型"),
         original_name=_optional_string(payload["original_name"], label="文件名"),
         extension=_require_string(payload["extension"], label="扩展名"),

@@ -45,6 +45,27 @@ def prepare(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_license_denial_keeps_job_queued_without_downloading(tmp_path: Path):
+    from tg_video_downloader.licensing import LicenseError
+
+    paths, state, gateway = prepare(tmp_path)
+    message = make_video(1)
+    state.upsert_job(message, "群", JobSource.LIVE)
+
+    async def deny():
+        raise LicenseError("expired")
+
+    try:
+        worker = DownloadWorker(paths, state, gateway, license_check=deny)
+        assert await worker.run_one() == "license_paused"
+        assert state.counts()["completed"] == 0
+        assert state.claim_next() is not None
+        assert gateway.download_offsets == []
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 async def test_download_is_atomic_and_marks_completed(tmp_path: Path) -> None:
     paths, state, gateway = prepare(tmp_path)
     payload = b"payload"

@@ -178,6 +178,8 @@ class GuiController:
         background_running: Callable[[ProjectPaths], bool] = downloader_is_running,
     ) -> None:
         self.paths = paths
+        from tg_video_downloader.licensing import create_license_gate
+        self.license_gate = create_license_gate()
         self.paths.ensure_directories()
         self.config_store = ConfigStore(paths)
         self.gateway_factory = gateway_factory
@@ -356,6 +358,7 @@ class GuiController:
         *,
         local_timezone: tzinfo | None = None,
     ) -> tuple[SelectableVideo, ...]:
+        await self.license_gate.ensure()
         if self.login_active:
             raise ValueError("请先完成或取消当前登录任务")
         groups = {group.chat_id: group for group in self.selected_groups()}
@@ -515,6 +518,7 @@ class GuiController:
         return root
 
     def start(self) -> object:
+        self.license_gate.require_cached()
         credentials = self.load_credentials()
         if credentials is None:
             raise ValueError("请先保存账号信息")

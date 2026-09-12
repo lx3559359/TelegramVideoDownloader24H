@@ -63,6 +63,9 @@ class ScannerCoordinator:
     async def handle_live(self, message: MessageInfo) -> None:
         if message.chat_id not in self.state.enabled_chat_ids():
             return
+        resolver = getattr(self.gateway, "resolve_collection", None)
+        if resolver is not None and is_downloadable_video(message):
+            message = await resolver(message)
         group = self.state.get_group(message.chat_id)
         self._record_access_success(message.chat_id)
         self.state.set_access_error(message.chat_id, None)

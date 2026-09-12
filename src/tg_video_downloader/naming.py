@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,18 @@ def sanitize_windows_name(value: str, max_length: int = 120) -> str:
     return cleaned[:max_length].rstrip(" .") or "_"
 
 
+def collection_directory(message: MessageInfo) -> str:
+    collection = message.collection_title
+    if not collection:
+        return message.date.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
+    directory = sanitize_windows_name(collection)
+    # Distinct titles must not collapse after Windows character cleanup.
+    if directory != collection or re.fullmatch(r"\d{4}-\d{2}", directory):
+        digest = sha256(collection.encode("utf-8")).hexdigest()[:10]
+        directory = f"{directory}_{digest}"
+    return directory
+
+
 def build_final_path(
     paths: ProjectPaths,
     group_title: str,
@@ -35,9 +48,8 @@ def build_final_path(
     download_root: Path | None = None,
 ) -> Path:
     group_dir = sanitize_windows_name(f"{group_title}_{message.chat_id}")
-    month = message.date.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
     root = (download_root or paths.downloads).resolve()
-    parent = root / group_dir / month
+    parent = root / group_dir / collection_directory(message)
     filename_limit = min(180, max(32, 240 - len(str(parent)) - 1))
     if message.original_name:
         original = sanitize_windows_name(message.original_name, 150)

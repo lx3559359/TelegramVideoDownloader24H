@@ -75,6 +75,8 @@ class MessageInfo:
     is_video: bool
     is_animated: bool
     is_round: bool
+    collection_title: str | None = None
+    grouped_id: int | None = None
 
 
 @dataclass(frozen=True)

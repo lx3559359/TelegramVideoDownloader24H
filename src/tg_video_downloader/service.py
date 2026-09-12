@@ -48,6 +48,8 @@ class DownloaderService:
         ] = SearchIpcServer,
     ) -> None:
         self.paths = paths
+        from tg_video_downloader.licensing import create_license_gate
+        self.license_gate = create_license_gate()
         self.gateway_factory = gateway_factory
         self.search_server_factory = search_server_factory
         self._config_error: str | None = None
@@ -104,6 +106,7 @@ class DownloaderService:
                 self.paths,
                 state,
                 gateway,
+                license_check=self.license_gate.ensure,
                 download_root=lambda: effective_download_root(
                     self.paths,
                     config_holder[0],
@@ -191,6 +194,10 @@ class DownloaderService:
         gateway: TelegramGateway,
         config_holder: list[AppConfig],
     ) -> tuple[SelectableVideo, ...]:
+        try:
+            await self.license_gate.ensure()
+        except ValueError as error:
+            raise SearchChannelError(str(error)) from error
         selected_ids = {group.chat_id for group in config_holder[0].groups}
         if request.chat_id not in selected_ids:
             raise SearchChannelError("只能检索当前已监听的群组或频道")

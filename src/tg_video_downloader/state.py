@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     message_date TEXT NOT NULL,
     mime_type TEXT,
     original_name TEXT,
+    collection_title TEXT,
     extension TEXT NOT NULL,
     expected_size INTEGER,
     is_video INTEGER NOT NULL,
@@ -99,6 +100,8 @@ class StateStore:
         }
         if "output_root" not in job_columns:
             self._connection.execute("ALTER TABLE jobs ADD COLUMN output_root TEXT")
+        if "collection_title" not in job_columns:
+            self._connection.execute("ALTER TABLE jobs ADD COLUMN collection_title TEXT")
         self._connection.commit()
 
     def close(self) -> None:
@@ -211,6 +214,7 @@ class StateStore:
             int(message.is_video),
             int(message.is_animated),
             int(message.is_round),
+            message.collection_title,
         )
         with self._connection:
             self._connection.execute(
@@ -218,10 +222,13 @@ class StateStore:
                 INSERT INTO jobs(
                     chat_id, message_id, group_title, source, priority, status,
                     message_date, mime_type, original_name, extension,
-                    expected_size, is_video, is_animated, is_round
+                    expected_size, is_video, is_animated, is_round, collection_title
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    collection_title = CASE WHEN jobs.output_root IS NULL
+                        AND jobs.status <> 'completed'
+                        THEN excluded.collection_title ELSE jobs.collection_title END,
                     group_title = excluded.group_title,
                     source = CASE
                         WHEN jobs.status <> 'completed' AND excluded.priority < jobs.priority
@@ -310,8 +317,8 @@ class StateStore:
                             chat_id, message_id, group_title, source, priority,
                             status, message_date, mime_type, original_name,
                             extension, expected_size, is_video, is_animated,
-                            is_round
-                        ) VALUES (?, ?, ?, 'live', 0, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+                            is_round, collection_title
+                        ) VALUES (?, ?, ?, 'live', 0, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             message.chat_id,
@@ -325,6 +332,7 @@ class StateStore:
                             int(message.is_video),
                             int(message.is_animated),
                             int(message.is_round),
+                            message.collection_title,
                         ),
                     )
                     counts["added"] += 1
@@ -340,6 +348,8 @@ class StateStore:
                             status = 'pending', message_date = ?, mime_type = ?,
                             original_name = ?, extension = ?, expected_size = ?,
                             is_video = ?, is_animated = ?, is_round = ?,
+                            collection_title = CASE WHEN output_root IS NULL
+                                THEN ? ELSE collection_title END,
                             attempts = 0, next_attempt_at = NULL, error = NULL
                         WHERE chat_id = ? AND message_id = ?
                         """,
@@ -353,6 +363,7 @@ class StateStore:
                             int(message.is_video),
                             int(message.is_animated),
                             int(message.is_round),
+                            message.collection_title,
                             message.chat_id,
                             message.message_id,
                         ),
@@ -609,6 +620,7 @@ class StateStore:
             date=datetime.fromisoformat(row["message_date"]),
             mime_type=row["mime_type"],
             original_name=row["original_name"],
+            collection_title=row["collection_title"],
             extension=str(row["extension"]),
             size=row["expected_size"],
             is_video=bool(row["is_video"]),

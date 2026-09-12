@@ -1,5 +1,6 @@
 import tkinter as tk
 from concurrent.futures import Future
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta, timezone
 from tkinter import ttk
 from types import SimpleNamespace
@@ -279,6 +280,8 @@ def test_search_page_builds_lightweight_controls_and_no_timer_until_search(
     assert tuple(str(value) for value in page.result_tree["show"]) == ("headings",)
     assert tuple(str(value) for value in page.result_tree["columns"]) == (
         "selected",
+        "title",
+        "folder",
         "date",
         "name",
         "size",
@@ -289,6 +292,30 @@ def test_search_page_builds_lightweight_controls_and_no_timer_until_search(
     assert page.cancel_button.instate(["disabled"])
     assert page.enqueue_button.instate(["disabled"])
     page.close()
+
+
+def test_search_page_previews_title_and_month_before_enqueue(tk_root):
+    notebook = ttk.Notebook(tk_root)
+    controller = FakeSearchController()
+    page = VideoSearchPage(notebook, controller, FakeSearchBridge(), lambda error: None)
+    first = make_selectable_item(SearchQueueState.AVAILABLE, message_id=1)
+    first = replace(first, result=replace(first.result,
+                    message=replace(first.result.message, collection_title='山河之旅')))
+    second = make_selectable_item(SearchQueueState.AVAILABLE, message_id=2)
+    try:
+        page.model.replace((first, second))
+        page._render_results()
+        assert page.result_tree.set('1', 'title') == '山河之旅'
+        assert page.result_tree.set('1', 'folder') == '山河之旅'
+        assert page.result_tree.set('2', 'title') == '未识别'
+        assert page.result_tree.set('2', 'folder') == '2026-08'
+        assert controller.enqueue_calls == []
+        page.model.toggle(1)
+        page.enqueue_selected()
+        assert controller.enqueue_calls[0][1][0].message.collection_title == '山河之旅'
+    finally:
+        page.close()
+        notebook.destroy()
 
 
 def test_search_page_passes_selected_iso_dates_to_controller(

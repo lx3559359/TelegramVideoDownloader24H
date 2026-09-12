@@ -162,6 +162,7 @@ class DownloaderApp(ttk.Frame):
         )
         self._build_run_page()
         self._build_update_page()
+        self._build_license_page()
         update_result = self.controller.consume_update_result()
         if update_result is not None:
             title = (
@@ -174,6 +175,45 @@ class DownloaderApp(ttk.Frame):
         if saved_credentials is not None:
             self._check_saved_session()
         self._refresh_status()
+
+    def _build_license_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=18)
+        self.notebook.add(page, text="授权")
+        page.columnconfigure(1, weight=1)
+        self.license_status_var = tk.StringVar(value="尚未验证。首次验证开始免费试用 24 小时。")
+        self.license_device_var = tk.StringVar(value="验证后显示")
+        self.activation_code_var = tk.StringVar()
+        ttk.Label(page, text="设备授权", font=("Microsoft YaHei UI", 13)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        ttk.Label(page, textvariable=self.license_status_var, wraplength=680).grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Label(page, text="设备码").grid(row=2, column=0, sticky="w", padx=(0, 12))
+        ttk.Entry(page, textvariable=self.license_device_var, state="readonly").grid(row=2, column=1, sticky="ew", pady=8)
+        ttk.Label(page, text="激活码").grid(row=3, column=0, sticky="w")
+        ttk.Entry(page, textvariable=self.activation_code_var, show="*").grid(row=3, column=1, sticky="ew", pady=8)
+        actions = ttk.Frame(page)
+        actions.grid(row=4, column=0, columnspan=2, sticky="w", pady=12)
+        self.license_refresh_button = ttk.Button(actions, text="开始试用 / 刷新授权", command=lambda: self._refresh_license(False))
+        self.license_refresh_button.pack(side="left", padx=(0, 12))
+        self.license_activate_button = ttk.Button(actions, text="激活 / 续费", command=lambda: self._refresh_license(True))
+        self.license_activate_button.pack(side="left")
+        ttk.Label(page, text="月卡 30 天 · 年卡 365 天 · 永久授权\n每码绑定一台设备。卸载重装不会重新计时。\n需联网首次验证；到期后保留下载文件和断点。", wraplength=680).grid(row=5, column=0, columnspan=2, sticky="w", pady=12)
+
+    def _refresh_license(self, activate: bool) -> None:
+        code = self.activation_code_var.get().strip() if activate else ""
+        if activate and not code:
+            self._show_error(ValueError("请输入激活码"))
+            return
+        button = self.license_activate_button if activate else self.license_refresh_button
+        self.license_status_var.set("正在连接授权服务器…")
+        def finished(status) -> None:
+            labels = {"trial": "免费试用", "month": "月卡", "year": "年卡", "permanent": "永久授权"}
+            expiry = "永久有效" if status.plan == "permanent" else datetime.fromtimestamp(status.expires_at).strftime("%Y-%m-%d %H:%M")
+            self.license_device_var.set(status.device)
+            self.license_status_var.set(f"{labels[status.plan]}｜{'可使用' if status.allowed else '已到期'}｜{expiry}")
+            if activate:
+                self.activation_code_var.set("")
+        def failed(error) -> None:
+            self.license_status_var.set(str(error))
+        self._run_async(self.controller.license_gate.refresh(code), button, finished, failed)
 
     def _build_account_page(self) -> None:
         self.notebook = ttk.Notebook(self)

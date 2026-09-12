@@ -310,6 +310,35 @@ class SearchClient(LifecycleClient):
 
 
 @pytest.mark.asyncio
+async def test_search_album_returns_without_extra_network_lookups(tmp_path):
+    blank = _search_message(3, datetime(2026, 8, 24, tzinfo=UTC))
+    titled = _search_message(2, datetime(2026, 8, 24, tzinfo=UTC), caption='【山河之旅】')
+    unrelated = _search_message(1, datetime(2026, 8, 24, tzinfo=UTC))
+    blank.grouped_id = titled.grouped_id = 77
+    unrelated.grouped_id = 88
+
+    class SlowAlbumClient(SearchClient):
+        lookup_count = 0
+
+        async def get_messages(self, *args, **kwargs):
+            self.lookup_count += 1
+            await asyncio.Event().wait()
+
+    client = SlowAlbumClient((blank, titled, unrelated))
+    gateway = TelethonGateway(ProjectPaths.from_root(tmp_path), Credentials(123, 'hash'),
+                              client_factory=lambda *args, **kwargs: client)
+    await gateway.connect()
+    try:
+        results = await asyncio.wait_for(gateway.search_videos(-1001, '', None, None, 20), 0.5)
+        assert len(results) == 3
+        assert results[0].message.collection_title == '山河之旅'
+        assert results[2].message.collection_title is None
+        assert client.lookup_count == 0
+    finally:
+        await gateway.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_search_videos_is_server_filtered_bounded_and_latest_first(
     tmp_path: Path,
 ) -> None:
@@ -808,3 +837,25 @@ async def test_gateway_logs_out_current_session(tmp_path: Path) -> None:
         await gateway.disconnect()
 
     assert client.logged_out is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hang", [False, True])
+async def test_optional_album_lookup_failure_preserves_video(tmp_path, monkeypatch, hang):
+    import asyncio
+    from types import SimpleNamespace
+    from tg_video_downloader.models import MessageInfo
+    import tg_video_downloader.gateway as gateway_module
+
+    async def lookup(*args, **kwargs):
+        if hang:
+            await asyncio.Event().wait()
+        raise OSError("temporary network failure")
+
+    gateway = TelethonGateway(ProjectPaths.from_root(tmp_path), Credentials(12345, "hash"))
+    gateway._client = SimpleNamespace(get_messages=lookup)
+    monkeypatch.setattr(gateway_module, "COLLECTION_LOOKUP_TIMEOUT", 0.01, raising=False)
+    message = MessageInfo(chat_id=-1001, message_id=12, date=datetime.now(UTC),
+                          mime_type="video/mp4", original_name="1.mp4", extension=".mp4",
+                          size=123, is_video=True, is_animated=False, is_round=False, grouped_id=7)
+    assert await asyncio.wait_for(gateway.resolve_collection(message), 0.2) == message

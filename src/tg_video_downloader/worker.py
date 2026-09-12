@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic as monotonic_clock
@@ -69,8 +69,10 @@ class DownloadWorker:
         monotonic: Callable[[], float] = monotonic_clock,
         stall_seconds: float = 120.0,
         monitor_seconds: float = 1.0,
+        license_check: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.paths = paths
+        self._license_check = license_check
         self.state = state
         self.gateway = gateway
         self._download_root = download_root or (lambda: paths.downloads)
@@ -95,6 +97,12 @@ class DownloadWorker:
         return len(recovered)
 
     async def run_one(self, stop: asyncio.Event | None = None) -> str:
+        if self._license_check is not None:
+            from tg_video_downloader.licensing import LicenseError
+            try:
+                await self._license_check()
+            except LicenseError:
+                return "license_paused"
         job = self.state.claim_next()
         if job is None:
             return "idle"
@@ -270,7 +278,7 @@ class DownloadWorker:
                 return
             if result == "idle":
                 await _wait_or_stop(stop, 1)
-            elif result == "disk_paused":
+            elif result in {"disk_paused", "license_paused"}:
                 await _wait_or_stop(stop, 60)
 
     def _part_path(self, chat_id: int, message_id: int) -> Path:

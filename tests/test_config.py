@@ -94,6 +94,23 @@ def test_reloader_keeps_last_valid_config(tmp_path: Path) -> None:
     assert reloader.last_error is not None
 
 
+def test_reloader_detects_content_change_with_same_timestamp(tmp_path: Path) -> None:
+    import os
+
+    paths = ProjectPaths.from_root(tmp_path)
+    store = ConfigStore(paths)
+    original = AppConfig(groups=(GroupTarget(-1001, "A 群"),))
+    store.save_config(original)
+    before = paths.config.stat()
+    reloader = store.reloader()
+    assert reloader.load_if_changed() == original
+    paths.config.write_text(paths.config.read_text(encoding="utf-8").replace("A 群", "B 群"), encoding="utf-8")
+    os.utime(paths.config, ns=(before.st_atime_ns, before.st_mtime_ns))
+    changed = reloader.load_if_changed()
+    assert changed is not None
+    assert changed.groups[0].title == "B 群"
+
+
 def test_old_config_uses_project_downloads(tmp_path: Path) -> None:
     paths = ProjectPaths.from_root(tmp_path)
     paths.config.write_text("config_poll_seconds = 5\n", encoding="utf-8")
