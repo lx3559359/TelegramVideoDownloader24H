@@ -166,7 +166,7 @@ class SponsorPanel(ttk.LabelFrame):
                 self.details_var.set("暂未配置，请联系管理员。")
             else:
                 self.details_var.set(
-                    f"收款人：{config.recipient}\n月卡 30 天 ¥{config.month / 100:.2f} · "
+                    f"月卡 30 天 ¥{config.month / 100:.2f} · "
                     f"年卡 365 天 ¥{config.year / 100:.2f} · 永久 ¥{config.permanent / 100:.2f}\n"
                     f"开通说明：{config.contact}")
                 self._picture = display.image.copy()

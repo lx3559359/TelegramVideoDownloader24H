@@ -171,6 +171,8 @@ def test_visible_identity_loads_payment_without_starting_license(tk_root, monkey
         tk_root.update()
         assert devices == ['a' * 64]
         assert panel.short_var.get() == 'ABC234'
+        assert '收款人' not in panel.details_var.get()
+        assert '15.90' in panel.details_var.get()
         panel.copy_device()
         assert tk_root.clipboard_get() == 'ABC234'
         assert panel._photo.width() >= 220
