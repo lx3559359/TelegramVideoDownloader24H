@@ -33,10 +33,15 @@ def test_enabled_config_requires_recipient_contact_and_image():
         sponsor.parse_config(payload)
 
 
-@pytest.mark.parametrize("short", ["", "ABC", "A" * 11, "OOOOO00000", "<script>!!"])
+@pytest.mark.parametrize("short", ["", "ABC", "A" * 7, "A" * 8, "A" * 9, "A" * 11, "OOOOO00000", "<script>!!"])
 def test_device_info_rejects_invalid_short_id(short):
     with pytest.raises(sponsor.SponsorError):
         sponsor.parse_device_info({"device": "a" * 64, "short_id": short}, "a" * 64)
+
+
+@pytest.mark.parametrize("short", ["ABC234", "ABCDE23456"])
+def test_device_info_accepts_new_six_and_legacy_ten(short):
+    assert sponsor.parse_device_info({"device": "a" * 64, "short_id": short}, "a" * 64) == short
 
 
 def test_device_info_is_bound_to_requested_hash():

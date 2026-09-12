@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-video-downloader"
-version = "0.3.7"
+version = "0.3.8"
 description = "Whitelist-only Telegram group video downloader for Windows"
 requires-python = ">=3.11"
 dependencies = [
@@ -27,6 +27,9 @@ tg-video-downloader = "tg_video_downloader.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+tg_video_downloader = ["assets/*.png", "assets/*.ico", "assets/*.ps1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

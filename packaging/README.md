@@ -1,6 +1,6 @@
 # Windows installer
 
-Version 0.3.7, Windows 10/11 x64. Includes resource title recognition/grouping, device sponsorship display, the permanent usage guide and frozen-launch/supervisor adaptations.
+Version 0.3.6, installer revision 1, Windows 10/11 x64. Built from released 0.3.6 plus frozen-launch, supervisor and installer-update adaptations in this task. Unfinished concurrent sponsorship work is not part of this installer.
 
 Build from the repository root with Windows Python 3.12 x64:
 
@@ -20,4 +20,4 @@ Smoke test: `python scripts/smoke-windows-installer.py` after silent installatio
 
 The installer runs per-user, creates shortcuts, blocks upgrade/uninstall while the EXE or packaged supervisor is active, and leaves user-created files on uninstall. No code-signing certificate is configured; do not promise SmartScreen suppression.
 
-Publish only verified immutable installers with matching checksums and website version. Server credentials and deployment automation are not distributed in this public source tree. Website updates must preserve the live authorization executable and existing downloads.
+Publication: `python scripts/publish-windows-installer.py --publish`, only after website build and installer verification. Uses saved VPS credentials without printing them, existing SSH host-key trust, independent staged Go tests, upload hash verification, configuration race detection and rollback on failed public health checks.

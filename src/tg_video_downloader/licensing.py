@@ -97,6 +97,13 @@ class LicenseGate:
         if not self.status.allowed or self._clock() >= self._deadline:
             raise LicenseError("试用/授权已到期或需要联网验证，请到“授权”页刷新或激活")
 
+    async def identify(self) -> str:
+        """Read the hardware ID without requesting or starting a license trial."""
+        async with self._lock:
+            if self._device is None:
+                self._device = await asyncio.to_thread(self._identify)
+            return self._device
+
     async def refresh(self, code: str = "") -> LicenseStatus:
         async with self._lock:
             if self._device is None:

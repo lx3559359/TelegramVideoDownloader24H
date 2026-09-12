@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from functools import wraps
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
@@ -46,6 +47,7 @@ from tg_video_downloader.storage import (
 from tg_video_downloader.windows import (
     clear_stop,
     downloader_is_running,
+    supervisor_is_running,
     request_stop,
     start_hidden_supervisor,
     wait_for_downloader_stop,
@@ -164,6 +166,21 @@ class WindowsProcessControl:
         request_stop(paths)
 
 
+def _login_operation(method):
+    """Reserve login across awaits so an installer cannot race a connection."""
+    @wraps(method)
+    async def guarded(self, *args, **kwargs):
+        with self._activity_lock:
+            self._require_not_installing()
+            self._login_operations += 1
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            with self._activity_lock:
+                self._login_operations -= 1
+    return guarded
+
+
 class GuiController:
     def __init__(
         self,
@@ -190,6 +207,9 @@ class GuiController:
         self._login_gateway: TelegramGateway | None = None
         self._login_credentials: Credentials | None = None
         self.update_manager: UpdateManager | None = None
+        self.installer_update_active = False
+        self._activity_lock = threading.RLock()
+        self._login_operations = 0
 
     def load_credentials(self) -> Credentials | None:
         try:
@@ -198,12 +218,18 @@ class GuiController:
             return None
 
     def save_credentials(self, credentials: Credentials) -> None:
+        self._require_not_installing()
         self.config_store.save_credentials(credentials.validate_api())
+
+    def _require_not_installing(self) -> None:
+        if self.installer_update_active:
+            raise ValueError("正在安装更新，请等待工具重启")
 
     @property
     def login_active(self) -> bool:
-        return self._login_gateway is not None
+        return self._login_gateway is not None or self._login_operations > 0
 
+    @_login_operation
     async def saved_session_authorized(self) -> bool:
         credentials = self.load_credentials()
         if credentials is None:
@@ -217,6 +243,7 @@ class GuiController:
         finally:
             await gateway.disconnect()
 
+    @_login_operation
     async def start_qr_login(
         self,
         credentials: Credentials,
@@ -285,6 +312,7 @@ class GuiController:
         if gateway is not None:
             await gateway.disconnect()
 
+    @_login_operation
     async def send_code(self, credentials: Credentials) -> None:
         credentials.validate_phone_login()
         self.save_credentials(credentials)
@@ -518,6 +546,7 @@ class GuiController:
         return root
 
     def start(self) -> object:
+        self._require_not_installing()
         self.license_gate.require_cached()
         credentials = self.load_credentials()
         if credentials is None:
@@ -529,6 +558,33 @@ class GuiController:
 
     def stop(self) -> None:
         self.process_control.request_stop(self.paths)
+
+    def prepare_installer_install(self, manager, prepared) -> None:
+        """Downloaded bytes are verified before any running service is stopped."""
+        with self._activity_lock:
+            self._require_not_installing()
+            if self.login_active:
+                raise ValueError("请先完成或取消当前登录任务")
+            self.installer_update_active = True
+        restore_service = False
+        try:
+            manager.validate_prepared(prepared)
+            manager.validate_install_environment()
+            restore_service = downloader_is_running(self.paths) or supervisor_is_running(self.paths)
+            if restore_service:
+                self.process_control.request_stop(self.paths)
+                try:
+                    wait_for_downloader_stop(self.paths)
+                except TimeoutError as error:
+                    raise TimeoutError('后台停止超时，已取消安装。后台可能仍在退出，请到运行页确认状态，必要时手动启动。') from error
+            manager.prepare_install(prepared, restore_service)
+        except Exception:
+            self.installer_update_active = False
+            if restore_service:
+                self.process_control.clear_stop(self.paths)
+                if not downloader_is_running(self.paths) and not supervisor_is_running(self.paths):
+                    self.process_control.start(self.paths.root)
+            raise
 
     def _get_update_manager(self) -> UpdateManager:
         if self.update_manager is None:

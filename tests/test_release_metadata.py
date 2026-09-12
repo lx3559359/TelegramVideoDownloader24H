@@ -9,7 +9,7 @@ def test_v036_docs_explain_grouping_and_licensing() -> None:
     )
     readme = (root / "README.md").read_text(encoding="utf-8")
 
-    assert pyproject["project"]["version"] == "0.3.7"
+    assert pyproject["project"]["version"] == "0.3.8"
     assert "24 小时" in readme
     assert "授权" in readme
     assert "识别片名" in readme

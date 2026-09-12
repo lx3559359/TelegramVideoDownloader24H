@@ -1,6 +1,14 @@
-#define AppVersion "0.3.7"
+#define AppVersion "0.3.8"
+#ifndef AppBuildSource
+  #define AppBuildSource "..\.tmp\windows-dist\TelegramVideoDownloader"
+#endif
 [Setup]
+#ifdef SmokeTest
+AppId=TelegramVideoDownloaderIsolatedSmoke
+Uninstallable=no
+#else
 AppId={{96C5A076-4681-44F4-B8C9-6A5C8E9A2E93}
+#endif
 AppName=Telegram 视频自动下载器
 AppVersion={#AppVersion}
 AppPublisher=Telegram 视频自动下载器
@@ -18,6 +26,7 @@ OutputBaseFilename=TelegramVideoDownloader-v{#AppVersion}-Windows-x64-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\src\tg_video_downloader\assets\app.ico
 UninstallDisplayIcon={app}\TelegramVideoDownloader.exe
 AppMutex=TelegramVideoDownloader.Running
 CloseApplications=no
@@ -33,14 +42,16 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："
 
 [Files]
-Source: "..\.tmp\windows-dist\TelegramVideoDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppBuildSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\scripts\run-supervisor.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "windows-readme.txt"; DestDir: "{app}"; DestName: "使用说明.txt"; Flags: ignoreversion
 Source: "LICENSE-Python.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
+#ifndef SmokeTest
 [Icons]
 Name: "{group}\Telegram 视频自动下载器"; Filename: "{app}\TelegramVideoDownloader.exe"; WorkingDir: "{app}"
 Name: "{userdesktop}\Telegram 视频自动下载器"; Filename: "{app}\TelegramVideoDownloader.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+#endif
 
 [Run]
 Filename: "{app}\TelegramVideoDownloader.exe"; Description: "启动 Telegram 视频自动下载器"; Flags: nowait postinstall skipifsilent

@@ -105,8 +105,8 @@ def test_status_icon_is_rgba_and_uses_requested_color() -> None:
 
     assert image.mode == "RGBA"
     assert image.size == (64, 64)
-    assert image.getpixel((8, 32)) == RUNNING_COLOR
-    assert image.getpixel((32, 24)) == (255, 255, 255, 255)
+    assert image.getpixel((53, 53)) == RUNNING_COLOR
+    assert image.getpixel((53, 42)) == (255, 255, 255, 255)
 
 
 class FakeIcon:

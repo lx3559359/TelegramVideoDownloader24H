@@ -131,6 +131,8 @@ class DownloaderApp(ttk.Frame):
     def __init__(self, master: tk.Tk, controller: GuiController) -> None:
         super().__init__(master, padding=12)
         self.master = master
+        from tg_video_downloader.gui.icons import set_window_icon
+        set_window_icon(master)
         self.controller = controller
         self.bridge = AsyncBridge()
         self._closed = False
@@ -204,11 +206,11 @@ class DownloaderApp(ttk.Frame):
         self.notebook.add(page, text="授权")
         page.columnconfigure(1, weight=1)
         self.license_status_var = tk.StringVar(value="尚未验证。首次验证开始免费试用 24 小时。")
-        self.license_device_var = tk.StringVar(value="验证后显示")
+        self.license_device_var = tk.StringVar(value="打开本页后读取设备码…")
         self.activation_code_var = tk.StringVar()
         ttk.Label(page, text="设备授权", font=("Microsoft YaHei UI", 13)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
         ttk.Label(page, textvariable=self.license_status_var, wraplength=680).grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
-        ttk.Label(page, text="设备码").grid(row=2, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(page, text="完整硬件设备码").grid(row=2, column=0, sticky="w", padx=(0, 12))
         ttk.Entry(page, textvariable=self.license_device_var, state="readonly").grid(row=2, column=1, sticky="ew", pady=8)
         ttk.Label(page, text="激活码").grid(row=3, column=0, sticky="w")
         ttk.Entry(page, textvariable=self.activation_code_var, show="*").grid(row=3, column=1, sticky="ew", pady=8)
@@ -222,6 +224,8 @@ class DownloaderApp(ttk.Frame):
         self.sponsor_panel = SponsorPanel(
             page, run_async=self._run_async,
             refresh_license=lambda: self._refresh_license(False),
+            identify=lambda: self.controller.license_gate.identify(),
+            on_device=self.license_device_var.set,
         )
         self.sponsor_panel.grid(row=6, column=0, columnspan=2, sticky="nsew")
 
@@ -582,6 +586,13 @@ class DownloaderApp(ttk.Frame):
         self.group_status.pack(fill="both", expand=True)
 
     def _build_update_page(self) -> None:
+        if getattr(sys, "frozen", False):
+            from tg_video_downloader.gui.installer_update_panel import InstallerUpdatePanel
+            self.installer_panel = InstallerUpdatePanel(
+                self.notebook, self.controller, on_exit=lambda: self._request_update_exit())
+            self.update_page = self.installer_panel
+            self.notebook.add(self.update_page, text="更新")
+            return
         page = ttk.Frame(self.notebook, padding=18)
         self.update_page = page
         self.notebook.add(page, text="更新")
@@ -681,8 +692,7 @@ class DownloaderApp(ttk.Frame):
 
     def _check_for_update(self) -> None:
         if getattr(sys, "frozen", False):
-            webbrowser.open("https://www.cqtcshequ.com/#download")
-            self.update_status_var.set("请从官网下载新版安装包；退出工具和后台任务后覆盖安装，保留原有数据。")
+            self.installer_panel.check()
             return
         self.update_status_var.set("正在检查稳定版本……")
         self.update_install_button.state(["disabled"])
@@ -1394,6 +1404,9 @@ class DownloaderApp(ttk.Frame):
         if self._closed:
             return
         self._closed = True
+        installer_panel = self.__dict__.get("installer_panel")
+        if installer_panel is not None:
+            installer_panel.close()
         panel = self.__dict__.get("sponsor_panel")
         if panel is not None:
             panel.close()
@@ -1416,6 +1429,13 @@ class DownloaderApp(ttk.Frame):
         self.qr_canvas.delete("all")
         self.search_page.close()
         self.bridge.close()
+
+    def can_exit(self) -> bool:
+        panel = self.__dict__.get("installer_panel")
+        if panel is not None and panel.state == 'installing':
+            messagebox.showinfo("正在准备更新", "请等待后台停止和更新助手就绪，工具将自动退出。", parent=self)
+            return False
+        return True
 
 
 def format_doctor_summary(report: DiagnosticReport, saved: Path) -> str:

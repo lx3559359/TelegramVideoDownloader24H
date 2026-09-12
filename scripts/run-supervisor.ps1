@@ -23,6 +23,17 @@ if (Test-Path -LiteralPath $PackagedExe) {
     $LaunchArguments = @("service")
     $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
     $InstallerGuard = New-Object System.Threading.Mutex($false, "TelegramVideoDownloader.Running")
+    $UpdateLockPath = Join-Path $RuntimeRoot 'installer-update.lock'
+    if (Test-Path -LiteralPath $UpdateLockPath) {
+        $UpdateProbe = $null
+        try {
+            $UpdateProbe = [System.IO.File]::Open($UpdateLockPath, 'Open', 'ReadWrite', 'None')
+        } catch [System.IO.IOException] {
+            exit 1
+        } finally {
+            if ($null -ne $UpdateProbe) { $UpdateProbe.Dispose() }
+        }
+    }
 } elseif (-not (Test-Path -LiteralPath $ProjectPython)) {
     & (Join-Path $PSScriptRoot "bootstrap.ps1")
     if ($LASTEXITCODE -ne 0) {

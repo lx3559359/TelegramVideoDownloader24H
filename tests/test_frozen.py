@@ -24,14 +24,13 @@ def test_frozen_update_diagnostics_do_not_need_git(monkeypatch, tmp_path):
     assert "安装包" in check.message
 
 
-def test_frozen_update_button_opens_official_site(monkeypatch):
+def test_frozen_update_button_checks_installer_release(monkeypatch):
     from tg_video_downloader.gui.app import DownloaderApp
     seen = []
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr("webbrowser.open", lambda url: seen.append(url))
-    stub = SimpleNamespace(update_status_var=SimpleNamespace(set=lambda value: None))
+    stub = SimpleNamespace(installer_panel=SimpleNamespace(check=lambda: seen.append('checked')))
     DownloaderApp._check_for_update(stub)
-    assert seen == ["https://www.cqtcshequ.com/#download"]
+    assert seen == ['checked']
 
 
 def test_supervisor_has_frozen_launch_without_bootstrap():

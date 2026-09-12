@@ -13,7 +13,7 @@ from PIL import Image, UnidentifiedImageError
 
 ORIGIN = "https://license.cqtcshequ.com"
 MAX_IMAGE_BYTES = 2 * 1024**2
-SHORT_ID = re.compile(r"[A-HJ-NP-Z2-9]{10}")
+SHORT_ID = re.compile(r"(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{10})")
 PATHS = {"/v1/device-info", "/v1/sponsor", "/v1/sponsor/image"}
 
 

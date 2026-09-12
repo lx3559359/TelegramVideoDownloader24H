@@ -6,6 +6,8 @@ from math import isfinite
 from threading import Event, RLock
 from typing import Any
 
+from .icons import load_app_icon
+
 
 RUNNING_COLOR = (35, 165, 82, 255)
 STARTING_COLOR = (230, 170, 20, 255)
@@ -112,6 +114,12 @@ def build_tray_presentation(snapshot: object) -> TrayPresentation:
 
 def create_status_icon(color: tuple[int, int, int, int]) -> Any:
     from PIL import Image, ImageDraw
+
+    image = load_app_icon(64)
+    if image is not None:
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((42, 42, 63, 63), fill=color, outline=(255, 255, 255, 255), width=2)
+        return image
 
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)

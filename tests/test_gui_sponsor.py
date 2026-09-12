@@ -52,7 +52,7 @@ def test_panel_has_manual_verification_and_copy(tk_root):
     panel = SponsorPanel(tk_root, run_async=run, refresh_license=lambda: None)
     try:
         assert "管理员核实" in panel.instructions.cget("text")
-        assert "暂未配置" in panel.details_var.get()
+        assert "加载" in panel.details_var.get()
         panel.short_var.set("ABCDE23456")
         panel.copy_device()
         assert tk_root.clipboard_get() == "ABCDE23456"
@@ -149,6 +149,43 @@ def test_real_tab_hide_and_window_withdraw_cancel_timer(tk_root):
         book.destroy()
 
 
+def test_visible_identity_loads_payment_without_starting_license(tk_root, monkeypatch):
+    from PIL import Image
+    from tg_video_downloader.gui import sponsor_panel as module
+    from tg_video_downloader.sponsorship import SponsorConfig, SponsorDisplay
+    async def identify():
+        return 'a' * 64
+    devices = []
+    monkeypatch.setattr(module, 'fetch_device_info', lambda _: 'ABC234')
+    monkeypatch.setattr(module, 'fetch_sponsor', lambda: SponsorDisplay(
+        SponsorConfig(True, '收款人', '等待管理员核实', 1590, 5990, 9990, 'a' * 64),
+        Image.new('RGB', (111, 111), 'white')))
+    def run(operation, button, success, error):
+        success(asyncio.run(operation))
+    panel = SponsorPanel(tk_root, run_async=run, refresh_license=lambda: None,
+                         identify=identify, on_device=devices.append)
+    try:
+        assert devices == []
+        panel.pack()
+        tk_root.deiconify()
+        tk_root.update()
+        assert devices == ['a' * 64]
+        assert panel.short_var.get() == 'ABC234'
+        panel.copy_device()
+        assert tk_root.clipboard_get() == 'ABC234'
+        assert panel._photo.width() >= 220
+        assert panel._poller.ready is False
+        def fail(_):
+            raise ValueError('设备信息离线')
+        monkeypatch.setattr(module, 'fetch_device_info', fail)
+        panel.reload()
+        assert panel._photo is not None
+        assert '暂勿付款' in panel.message_var.get()
+    finally:
+        panel.close()
+        panel.destroy()
+
+
 def test_panel_fetch_failure_keeps_device_reference(tk_root, monkeypatch):
     from tg_video_downloader.gui import sponsor_panel as module
     from tg_video_downloader.sponsorship import SponsorError
@@ -179,6 +216,7 @@ def test_license_page_sponsor_controls_fit_default_window(tk_root):
     try:
         app.notebook = ttk.Notebook(app)
         app.notebook.pack(fill="both", expand=True)
+        app._run_async = lambda operation, *args: operation.close()
         app._build_license_page()
         tk_root.update()
         panel = app.sponsor_panel

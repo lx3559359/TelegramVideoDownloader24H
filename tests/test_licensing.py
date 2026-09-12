@@ -1,7 +1,20 @@
 import pytest
+import asyncio
 
 from tg_video_downloader.licensing import LicenseError, LicenseGate, fingerprint
 from tg_video_downloader.licensing import create_license_gate as release_gate_factory
+
+
+@pytest.mark.asyncio
+async def test_identify_is_cached_and_never_starts_license_trial():
+    reads = []
+    calls = []
+    gate = LicenseGate(identify=lambda: reads.append(1) or 'a' * 64,
+                       transport=lambda *args: calls.append(args))
+    assert await asyncio.gather(gate.identify(), gate.identify()) == ['a' * 64] * 2
+    assert reads == [1]
+    assert calls == []
+    assert gate.status is None
 
 
 def test_release_factory_enforces_online_licensing():

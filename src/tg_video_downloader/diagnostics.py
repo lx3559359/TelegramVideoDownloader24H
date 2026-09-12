@@ -257,7 +257,10 @@ class Doctor:
 
     def _check_update_support(self) -> DiagnosticCheck:
         if getattr(sys, "frozen", False):
-            return DiagnosticCheck("update_support", "pass", "独立安装版：请从官网下载新版安装包覆盖升级，无需 Git 或 Python")
+            from tg_video_downloader.installer_update import helper_source
+            if not helper_source().is_file():
+                return DiagnosticCheck("update_support", "warning", "缺少安装包更新助手，请从官网覆盖安装")
+            return DiagnosticCheck("update_support", "pass", "独立安装版：可在更新页检查、下载安装包并校验升级，无需 Git 或 Python")
         git = shutil.which("git")
         powershell = shutil.which("powershell.exe")
         script = self.paths.root / "scripts" / "apply-update.ps1"

@@ -1,8 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import copy_metadata
 
-datas = []
+ROOT = Path(SPECPATH).resolve().parent
+ASSETS = ROOT / 'src/tg_video_downloader/assets'
+datas = [(str(ASSETS), 'tg_video_downloader/assets')]
 binaries = []
 hiddenimports = ['pystray._win32']
 datas += copy_metadata('telegram-video-downloader', recursive=True)
@@ -13,8 +16,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['windows_entry.py'],
-    pathex=['src'],
+    [str(ROOT / 'packaging/windows_entry.py')],
+    pathex=[str(ROOT / 'src')],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -33,6 +36,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='TelegramVideoDownloader',
+    icon=str(ASSETS / 'app.ico'),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

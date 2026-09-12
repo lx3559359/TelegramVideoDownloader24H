@@ -63,6 +63,8 @@ def run_gui(
             nonlocal closing
             if closing:
                 return
+            if hasattr(app, 'can_exit') and not app.can_exit():
+                return
             closing = True
             if activation_after is not None:
                 try:

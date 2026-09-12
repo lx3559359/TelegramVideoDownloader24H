@@ -8,7 +8,7 @@ commit=git('rev-parse','HEAD').decode().strip()
 out=root/'.tmp'/'public-releases';out.mkdir(parents=True,exist_ok=True)
 name=f'TelegramVideoDownloader-v{version}-Windows.zip';target=out/name
 if target.exists():raise SystemExit('Release archive already exists; do not overwrite silently')
-allowed=['src','tests','packaging','scripts/bootstrap.ps1','scripts/check.ps1','scripts/launch-gui.ps1','scripts/run-supervisor.ps1','scripts/apply-update.ps1','README.md','pyproject.toml','config.example.toml','打开配置器.cmd','.gitignore']
+allowed=['src','tests','packaging','scripts/build-app-icons.py','scripts/build-installer-manifest.py','scripts/bootstrap.ps1','scripts/check.ps1','scripts/launch-gui.ps1','scripts/run-supervisor.ps1','scripts/apply-update.ps1','README.md','pyproject.toml','config.example.toml','打开配置器.cmd','.gitignore']
 subprocess.run(['git','archive','--format=zip',f'--prefix=TelegramVideoDownloader-v{version}/','-o',str(target),'HEAD',*allowed],cwd=root,check=True)
 note=f'''Telegram 视频自动下载器 v{version} — Windows 源码启动包
 
