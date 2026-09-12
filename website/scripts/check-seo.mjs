@@ -1,0 +1,11 @@
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+const html = readFileSync(new URL('../dist/client/index.html', import.meta.url), 'utf8');
+assert.equal((html.match(/<h1>/g) || []).length, 1);
+for (const text of ['Telegram 视频下载器', 'TG 视频下载工具', '关键词和日期', 'canonical', 'og:title', 'Python 3.11', 'downloads/TelegramVideoDownloader', 'id="video-download-guide"']) assert.ok(html.includes(text), text);
+const robots = readFileSync(new URL('../dist/client/robots.txt', import.meta.url), 'utf8');
+assert.ok(robots.includes('Sitemap: https://www.cqtcshequ.com/sitemap.xml'));
+const sitemap = readFileSync(new URL('../dist/client/sitemap.xml', import.meta.url), 'utf8');
+assert.equal((sitemap.match(/<loc>/g) || []).length, 1);
+assert.ok(sitemap.includes('<loc>https://www.cqtcshequ.com/</loc>'));
+console.log('SEO output verified: complete static content, one H1, canonical, sharing metadata, download link and crawler files.');

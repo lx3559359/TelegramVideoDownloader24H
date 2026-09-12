@@ -256,6 +256,8 @@ class Doctor:
         return DiagnosticCheck("login_task", "pass", "没有未清理的登录任务")
 
     def _check_update_support(self) -> DiagnosticCheck:
+        if getattr(sys, "frozen", False):
+            return DiagnosticCheck("update_support", "pass", "独立安装版：请从官网下载新版安装包覆盖升级，无需 Git 或 Python")
         git = shutil.which("git")
         powershell = shutil.which("powershell.exe")
         script = self.paths.root / "scripts" / "apply-update.ps1"

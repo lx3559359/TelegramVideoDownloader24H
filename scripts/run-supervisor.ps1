@@ -16,7 +16,14 @@ $env:PIP_CACHE_DIR = Join-Path $CacheRoot "pip"
 $env:PYTHONPYCACHEPREFIX = Join-Path $CacheRoot "pycache"
 
 $ProjectPython = Join-Path $VenvRoot "Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $ProjectPython)) {
+$LaunchArguments = @("-m", "tg_video_downloader", "service")
+$PackagedExe = Join-Path $ProjectRoot "TelegramVideoDownloader.exe"
+if (Test-Path -LiteralPath $PackagedExe) {
+    $ProjectPython = $PackagedExe
+    $LaunchArguments = @("service")
+    $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
+    $InstallerGuard = New-Object System.Threading.Mutex($false, "TelegramVideoDownloader.Running")
+} elseif (-not (Test-Path -LiteralPath $ProjectPython)) {
     & (Join-Path $PSScriptRoot "bootstrap.ps1")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
@@ -49,7 +56,7 @@ try {
         $Process = Start-Process `
             -WindowStyle Hidden `
             -FilePath $ProjectPython `
-            -ArgumentList "-m", "tg_video_downloader", "service" `
+            -ArgumentList $LaunchArguments `
             -WorkingDirectory $ProjectRoot `
             -Wait `
             -PassThru

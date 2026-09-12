@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from tg_video_downloader.diagnostics import Doctor
@@ -12,9 +13,10 @@ from tg_video_downloader.service import DownloaderService
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("gui", "service", "doctor"))
+    parser.add_argument("command", choices=("gui", "service", "doctor"), nargs="?", default="gui")
     args = parser.parse_args(argv)
-    root = Path(__file__).resolve().parents[2]
+    root = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+            else Path(__file__).resolve().parents[2])
     paths = ProjectPaths.from_root(root)
     if args.command == "gui":
         from tg_video_downloader.gui.runtime import run_gui

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tkinter as tk
+import sys
+import webbrowser
 from collections.abc import Callable
 from concurrent.futures import CancelledError, Future
 from datetime import datetime
@@ -24,6 +26,8 @@ from tg_video_downloader.gui.qr_view import (
     seconds_until_expiry,
 )
 from tg_video_downloader.gui.search_page import VideoSearchPage
+from tg_video_downloader.gui.sponsor_panel import SponsorPanel
+from tg_video_downloader.gui.usage_guide import UsageGuidePage
 from tg_video_downloader.models import Credentials, GroupTarget
 
 
@@ -130,6 +134,7 @@ class DownloaderApp(ttk.Frame):
         self.controller = controller
         self.bridge = AsyncBridge()
         self._closed = False
+        self._license_busy = False
         self._status_after: str | None = None
         self._status_listener: Callable[[dict[str, object]], None] = (
             lambda _snapshot: None
@@ -163,6 +168,9 @@ class DownloaderApp(ttk.Frame):
         self._build_run_page()
         self._build_update_page()
         self._build_license_page()
+        self.guide_page = UsageGuidePage(
+            self.notebook, navigate=self._navigate_guide, read_state=self._guide_state,
+        )
         update_result = self.controller.consume_update_result()
         if update_result is not None:
             title = (
@@ -174,10 +182,25 @@ class DownloaderApp(ttk.Frame):
         saved_credentials = self._load_saved_credentials()
         if saved_credentials is not None:
             self._check_saved_session()
+        else:
+            self.notebook.select(self.guide_page)
         self._refresh_status()
+
+    def _navigate_guide(self, target: str) -> None:
+        pages = {"账号": self.account_page, "群组/频道": self.groups_page,
+                 "运行": self.run_page, "授权": self.license_page}
+        self.notebook.select(pages[target])
+
+    def _guide_state(self) -> dict[str, object]:
+        return {"api_saved": self.controller.load_credentials() is not None,
+                "account": self.account_status_var.get(),
+                "targets": len(self.controller.selected_groups()),
+                "status": self.status_vars["status"].get(),
+                "license": self.license_status_var.get()}
 
     def _build_license_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=18)
+        self.license_page = page
         self.notebook.add(page, text="授权")
         page.columnconfigure(1, weight=1)
         self.license_status_var = tk.StringVar(value="尚未验证。首次验证开始免费试用 24 小时。")
@@ -196,23 +219,43 @@ class DownloaderApp(ttk.Frame):
         self.license_activate_button = ttk.Button(actions, text="激活 / 续费", command=lambda: self._refresh_license(True))
         self.license_activate_button.pack(side="left")
         ttk.Label(page, text="月卡 30 天 · 年卡 365 天 · 永久授权\n每码绑定一台设备。卸载重装不会重新计时。\n需联网首次验证；到期后保留下载文件和断点。", wraplength=680).grid(row=5, column=0, columnspan=2, sticky="w", pady=12)
+        self.sponsor_panel = SponsorPanel(
+            page, run_async=self._run_async,
+            refresh_license=lambda: self._refresh_license(False),
+        )
+        self.sponsor_panel.grid(row=6, column=0, columnspan=2, sticky="nsew")
 
     def _refresh_license(self, activate: bool) -> None:
+        if self.__dict__.get("_license_busy", False):
+            return
         code = self.activation_code_var.get().strip() if activate else ""
         if activate and not code:
             self._show_error(ValueError("请输入激活码"))
             return
         button = self.license_activate_button if activate else self.license_refresh_button
+        self._license_busy = True
+        previous = self.license_status_var.get().split("\n刷新失败：", 1)[0]
+        self.license_activate_button.state(["disabled"])
+        self.license_refresh_button.state(["disabled"])
         self.license_status_var.set("正在连接授权服务器…")
+        def release_buttons() -> None:
+            self._license_busy = False
+            self.license_activate_button.state(["!disabled"])
+            self.license_refresh_button.state(["!disabled"])
         def finished(status) -> None:
+            release_buttons()
             labels = {"trial": "免费试用", "month": "月卡", "year": "年卡", "permanent": "永久授权"}
             expiry = "永久有效" if status.plan == "permanent" else datetime.fromtimestamp(status.expires_at).strftime("%Y-%m-%d %H:%M")
             self.license_device_var.set(status.device)
             self.license_status_var.set(f"{labels[status.plan]}｜{'可使用' if status.allowed else '已到期'}｜{expiry}")
             if activate:
                 self.activation_code_var.set("")
+            panel = self.__dict__.get("sponsor_panel")
+            if panel is not None:
+                panel.license_refreshed(status.device)
         def failed(error) -> None:
-            self.license_status_var.set(str(error))
+            release_buttons()
+            self.license_status_var.set(f"{previous}\n刷新失败：{error}（以上为上次验证结果）")
         self._run_async(self.controller.license_gate.refresh(code), button, finished, failed)
 
     def _build_account_page(self) -> None:
@@ -220,6 +263,7 @@ class DownloaderApp(ttk.Frame):
         self.notebook.pack(fill="both", expand=True)
         page = ttk.Frame(self.notebook, padding=18)
         self.notebook.add(page, text="账号")
+        self.account_page = page
         page.columnconfigure(1, weight=1)
 
         self.api_id_var = tk.StringVar()
@@ -385,6 +429,7 @@ class DownloaderApp(ttk.Frame):
     def _build_groups_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=12)
         self.notebook.add(page, text="群组/频道")
+        self.groups_page = page
         page.rowconfigure(1, weight=1)
         page.columnconfigure(0, weight=1)
 
@@ -555,7 +600,7 @@ class DownloaderApp(ttk.Frame):
         )
         self.update_check_button = ttk.Button(
             page,
-            text="检查更新",
+            text="打开官网下载更新" if getattr(sys, "frozen", False) else "检查更新",
             command=self._check_for_update,
         )
         self.update_check_button.grid(row=0, column=2, padx=(8, 0))
@@ -566,7 +611,7 @@ class DownloaderApp(ttk.Frame):
         )
         self.update_install_button.grid(row=0, column=3, padx=(8, 0))
         self.update_install_button.state(["disabled"])
-        self.update_status_var = tk.StringVar(value="仅在手动检查时联网")
+        self.update_status_var = tk.StringVar(value=("独立安装版：从官网下载新版安装包，退出工具和后台任务后覆盖安装。" if getattr(sys, "frozen", False) else "仅在手动检查时联网"))
         ttk.Label(page, textvariable=self.update_status_var).grid(
             row=1,
             column=0,
@@ -576,7 +621,7 @@ class DownloaderApp(ttk.Frame):
         )
         ttk.Label(
             page,
-            text="搜索只过滤下面的变更预览；安装始终应用完整稳定版本。",
+            text=("已内置运行环境，无需安装 Python 或 Git；本页的源码更新功能不适用于安装版。" if getattr(sys, "frozen", False) else "搜索只过滤下面的变更预览；安装始终应用完整稳定版本。"),
         ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 6))
         self.update_search_var = tk.StringVar()
         self.update_search_var.trace_add(
@@ -635,6 +680,10 @@ class DownloaderApp(ttk.Frame):
         self._request_update_exit = callback
 
     def _check_for_update(self) -> None:
+        if getattr(sys, "frozen", False):
+            webbrowser.open("https://www.cqtcshequ.com/#download")
+            self.update_status_var.set("请从官网下载新版安装包；退出工具和后台任务后覆盖安装，保留原有数据。")
+            return
         self.update_status_var.set("正在检查稳定版本……")
         self.update_install_button.state(["disabled"])
         self._run_async(
@@ -1321,6 +1370,9 @@ class DownloaderApp(ttk.Frame):
             self.progress_bar_label_var.set("状态读取失败")
             self._publish_status({"status": "error", "error": message})
         self._status_after = self.after(2000, self._refresh_status)
+        guide = self.__dict__.get("guide_page")
+        if guide is not None and guide.winfo_viewable():
+            guide.refresh()
 
     def _show_error(self, error: Exception) -> None:
         messagebox.showerror("操作失败", self._safe_error(error))
@@ -1342,6 +1394,9 @@ class DownloaderApp(ttk.Frame):
         if self._closed:
             return
         self._closed = True
+        panel = self.__dict__.get("sponsor_panel")
+        if panel is not None:
+            panel.close()
         self._qr_generation += 1
         self._cancel_qr_callbacks()
         if self._status_after is not None:
