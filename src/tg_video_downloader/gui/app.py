@@ -225,6 +225,8 @@ class DownloaderApp(ttk.Frame):
             page, run_async=self._run_async,
             refresh_license=lambda: self._refresh_license(False),
             identify=lambda: self.controller.license_gate.identify(),
+            reidentify=lambda: self.controller.license_gate.identify(force=True),
+            on_identity_error=lambda error: self.license_device_var.set('读取失败，请点击“重新获取设备码”'),
             on_device=self.license_device_var.set,
         )
         self.sponsor_panel.grid(row=6, column=0, columnspan=2, sticky="nsew")

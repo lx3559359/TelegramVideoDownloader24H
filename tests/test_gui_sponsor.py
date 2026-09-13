@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
@@ -20,6 +21,37 @@ class Scheduler:
 
     def after_cancel(self, token):
         self.pending.pop(token, None)
+
+
+def test_retry_button_recovers_hardware_failure_without_trial(tk_root, monkeypatch):
+    from tg_video_downloader.gui import sponsor_panel as module
+    from tg_video_downloader.sponsorship import SponsorConfig, SponsorDisplay
+    from PIL import Image
+    errors, calls, devices = [], [], []
+    async def initial():
+        raise ValueError('设备读取超时')
+    async def retry():
+        calls.append(True)
+        return 'a' * 64
+    monkeypatch.setattr(module, 'fetch_device_info', lambda _: 'ABC234')
+    monkeypatch.setattr(module, 'fetch_sponsor', lambda: SponsorDisplay(
+        SponsorConfig(True, 'hidden', '说明', 1590, 5990, 9990, 'a' * 64), Image.new('RGB', (220, 220))))
+    def run(operation, button, success, error):
+        success(asyncio.run(operation))
+    panel = SponsorPanel(tk_root, run_async=run, refresh_license=lambda: pytest.fail('must not start trial'),
+                         identify=initial, reidentify=retry, on_device=devices.append,
+                         on_identity_error=errors.append)
+    try:
+        panel.reload()
+        assert errors and '失败' in panel.short_var.get()
+        assert not panel._busy
+        panel.reidentify_button.invoke()
+        assert calls == [True]
+        assert devices == ['a' * 64]
+        assert panel.short_var.get() == 'ABC234'
+        assert panel._poller.ready is False
+    finally:
+        panel.close(); panel.destroy()
 
 
 def test_polling_only_when_visible_and_registered():
@@ -70,6 +102,7 @@ def test_panel_duplicate_reload_does_not_start_another_request(tk_root):
     try:
         panel.license_refreshed("a" * 64)
         panel.license_refreshed("a" * 64)
+        panel.reload(force=True)
         assert len(queued) == 1
         assert panel._device == "a" * 64
     finally:

@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+from pathlib import Path
 import re
 import ssl
 import subprocess
@@ -23,20 +25,52 @@ class LicenseError(ValueError):
 
 def device_code() -> str:
     command = (
-        "$u=(Get-CimInstance Win32_ComputerSystemProduct).UUID;"
-        "$b=(Get-CimInstance Win32_BIOS).SerialNumber;"
-        "@{uuid=$u;bios=$b}|ConvertTo-Json -Compress"
+        "$ErrorActionPreference='Stop';"
+        "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);"
+        "$u=$null;$b=$null;$queryFailed=$false;"
+        "try {$u=(Get-CimInstance Win32_ComputerSystemProduct).UUID} catch {$queryFailed=$true};"
+        "try {$b=(Get-CimInstance Win32_BIOS).SerialNumber} catch {$queryFailed=$true};"
+        "@{uuid=$u;bios=$b;query_failed=$queryFailed}|ConvertTo-Json -Compress"
     )
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True, timeout=15, check=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        values = json.loads(result.stdout.decode("utf-8-sig"))
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
-        raise LicenseError("无法读取设备标识，请检查 Windows WMI 服务") from error
-    return fingerprint(values.get("uuid"), values.get("bios"))
+    system_root = os.environ.get('SystemRoot')
+    if not system_root:
+        raise LicenseError('找不到 Windows 系统目录，无法启动设备读取程序')
+    powershell = Path(system_root) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                [str(powershell), "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True, timeout=15, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            values = json.loads(result.stdout.decode("utf-8-sig"))
+            if not isinstance(values, dict) or any(
+                values.get(key) is not None and not isinstance(values[key], str)
+                for key in ('uuid', 'bios')
+            ):
+                raise ValueError('Invalid hardware response')
+            try:
+                return fingerprint(values.get('uuid'), values.get('bios'))
+            except LicenseError:
+                if values.get('query_failed') is True:
+                    raise subprocess.CalledProcessError(2, str(powershell)) from None
+                raise
+        except FileNotFoundError as error:
+            raise LicenseError('找不到系统 Windows PowerShell，请检查系统组件') from error
+        except subprocess.TimeoutExpired as error:
+            failure = LicenseError('设备读取超时（每次 15 秒，已尝试 2 次），请点击重新获取设备码')
+            cause = error
+        except subprocess.CalledProcessError as error:
+            failure = LicenseError(f'设备读取命令失败（退出码 {error.returncode}），请检查 PowerShell / WMI 权限后重新获取')
+            cause = error
+        except LicenseError:
+            raise
+        except (ValueError, UnicodeError) as error:
+            raise LicenseError('设备读取结果格式错误，请重新获取设备码') from error
+        except OSError as error:
+            raise LicenseError(f'无法启动设备读取程序（系统错误 {getattr(error, "winerror", None) or error.errno}）') from error
+        if attempt == 1:
+            raise failure from cause
 
 
 def fingerprint(uuid: str | None, bios: str | None) -> str:
@@ -97,11 +131,14 @@ class LicenseGate:
         if not self.status.allowed or self._clock() >= self._deadline:
             raise LicenseError("试用/授权已到期或需要联网验证，请到“授权”页刷新或激活")
 
-    async def identify(self) -> str:
+    async def identify(self, *, force: bool = False) -> str:
         """Read the hardware ID without requesting or starting a license trial."""
         async with self._lock:
-            if self._device is None:
-                self._device = await asyncio.to_thread(self._identify)
+            if self._device is None or force:
+                device = await asyncio.to_thread(self._identify)
+                if self._device is not None and device != self._device:
+                    raise LicenseError('硬件标识发生变化，已保留原设备绑定，请联系管理员核对')
+                self._device = device
             return self._device
 
     async def refresh(self, code: str = "") -> LicenseStatus:

@@ -46,10 +46,13 @@ class VisibleRefresh:
 
 
 class SponsorPanel(ttk.LabelFrame):
-    def __init__(self, parent, *, run_async, refresh_license, identify=None, on_device=None):
+    def __init__(self, parent, *, run_async, refresh_license, identify=None, on_device=None,
+                 reidentify=None, on_identity_error=None):
         super().__init__(parent, text="赞助解锁", padding=10)
         self._run_async = run_async
         self._identify = identify
+        self._reidentify = reidentify
+        self._on_identity_error = on_identity_error
         self._on_device = on_device
         self._loaded = False
         self._picture = None
@@ -82,6 +85,8 @@ class SponsorPanel(ttk.LabelFrame):
         self.image_label.grid(row=0, column=1, rowspan=4, padx=(12, 0))
         self.image_label.bind("<Button-1>", self.enlarge_qr)
         ttk.Button(self, text="点击放大二维码", command=self.enlarge_qr).grid(row=4, column=1)
+        self.reidentify_button = ttk.Button(self, text="重新获取设备码", command=lambda: self.reload(force=True))
+        self.reidentify_button.grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.bind("<Map>", self._visibility, add="+")
         self.bind("<Unmap>", self._visibility, add="+")
 
@@ -121,19 +126,23 @@ class SponsorPanel(ttk.LabelFrame):
             self.clipboard_append(self.short_var.get())
             self.message_var.set("已复制付款备注号；它不是激活码，无需填写完整硬件设备码。")
 
-    def reload(self) -> None:
+    def reload(self, *, force=False) -> None:
         if self._closed or self._busy:
             return
         self._busy = True
+        self.reidentify_button.state(['disabled'])
+        if force or self._device is None:
+            self.short_var.set('正在读取…')
         self.message_var.set("正在加载赞助信息…")
 
         async def load():
             async def identity():
                 device = self._device
-                if device is None:
-                    if self._identify is None:
+                if device is None or force:
+                    identify = self._reidentify if force else self._identify
+                    if identify is None:
                         raise ValueError("设备码尚未读取")
-                    device = await self._identify()
+                    device = await identify()
                 try:
                     short = await asyncio.to_thread(fetch_device_info, device)
                     return device, short, None
@@ -145,9 +154,14 @@ class SponsorPanel(ttk.LabelFrame):
             self._busy = False
             if self._closed:
                 return
+            self.reidentify_button.state(['!disabled'])
             self._loaded = True
             identity, display = result
             identity_error = identity if isinstance(identity, Exception) else identity[2]
+            if identity_error is not None:
+                self.short_var.set('获取失败，请重试')
+                if self._device is None and isinstance(identity, Exception) and self._on_identity_error:
+                    self._on_identity_error(identity_error)
             if not isinstance(identity, Exception):
                 device, short, _ = identity
                 self._device = device
@@ -156,7 +170,8 @@ class SponsorPanel(ttk.LabelFrame):
                 if short is not None:
                     self.short_var.set(short)
             if isinstance(display, Exception):
-                failed(display)
+                failed(f'设备读取/备注号获取失败：{identity_error}；赞助信息加载失败：{display}'
+                       if identity_error is not None else display)
                 return
             self._photo = None
             self._picture = None
@@ -185,6 +200,9 @@ class SponsorPanel(ttk.LabelFrame):
             self._busy = False
             if self._closed:
                 return
+            self.reidentify_button.state(['!disabled'])
+            if self.short_var.get() in ('正在读取…', '加载后显示'):
+                self.short_var.set('获取失败，请重试')
             # Hide potentially stale payment instructions; licensing state stays intact.
             self._photo = None
             self._picture = None

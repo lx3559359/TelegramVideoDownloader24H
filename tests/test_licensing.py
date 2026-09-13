@@ -1,6 +1,85 @@
 import pytest
 import asyncio
 
+
+@pytest.mark.asyncio
+async def test_forced_identification_preserves_binding_and_trial():
+    answers = iter(['a' * 64, 'a' * 64, 'b' * 64])
+    gate = LicenseGate(identify=lambda: next(answers))
+    assert await gate.identify() == 'a' * 64
+    assert await gate.identify(force=True) == 'a' * 64
+    with pytest.raises(LicenseError, match='变化'):
+        await gate.identify(force=True)
+    assert await gate.identify() == 'a' * 64
+    assert gate.status is None
+
+
+def test_device_read_retries_timeout_with_absolute_powershell(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from tg_video_downloader import licensing as module
+    calls = []
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(args, 15)
+        return SimpleNamespace(stdout=b'{"uuid":"12345678-1234-1234-1234-1234567890ab","bios":""}')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    monkeypatch.setenv('SystemRoot', 'C:\\Windows')
+    assert module.device_code() == fingerprint('12345678-1234-1234-1234-1234567890ab', '')
+    assert len(calls) == 2
+    assert calls[0][0][0].lower().endswith('system32\\windowspowershell\\v1.0\\powershell.exe')
+    assert 'UTF8Encoding' in calls[0][0][-1]
+    assert 'try {$u=' in calls[0][0][-1]
+    assert 'try {$b=' in calls[0][0][-1]
+    assert calls[0][1]['timeout'] == 15
+
+
+@pytest.mark.parametrize('kind,expected,count', [
+    ('missing', 'PowerShell', 1), ('timeout', '超时', 2),
+    ('command', '退出码 7', 2), ('json', '格式错误', 1), ('shape', '格式错误', 1),
+])
+def test_device_read_failures_are_bounded_and_specific(monkeypatch, kind, expected, count):
+    import subprocess
+    from types import SimpleNamespace
+    from tg_video_downloader import licensing as module
+    calls = []
+    def run(*args, **kwargs):
+        calls.append(1)
+        if kind == 'missing': raise FileNotFoundError()
+        if kind == 'timeout': raise subprocess.TimeoutExpired('probe', 15)
+        if kind == 'command': raise subprocess.CalledProcessError(7, 'probe', stderr=b'private serial')
+        return SimpleNamespace(stdout=b'bad' if kind == 'json' else b'[]')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    with pytest.raises(LicenseError, match=expected) as error:
+        module.device_code()
+    assert 'private serial' not in str(error.value)
+    assert len(calls) == count
+
+
+def test_cim_query_failure_retries_without_changing_fallback(monkeypatch):
+    from types import SimpleNamespace
+    from tg_video_downloader import licensing as module
+    calls = []
+    def run(*args, **kwargs):
+        calls.append(1)
+        return SimpleNamespace(stdout=(b'{"uuid":null,"bios":null,"query_failed":true}'
+            if len(calls) == 1 else b'{"uuid":null,"bios":"valid-bios","query_failed":true}'))
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    assert module.device_code() == fingerprint(None, 'valid-bios')
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_forced_read_keeps_existing_cache_and_status():
+    gate = LicenseGate(identify=lambda: 'a' * 64)
+    await gate.identify()
+    def fail(): raise LicenseError('timeout')
+    gate._identify = fail
+    with pytest.raises(LicenseError): await gate.identify(force=True)
+    assert await gate.identify() == 'a' * 64
+    assert gate.status is None
+
 from tg_video_downloader.licensing import LicenseError, LicenseGate, fingerprint
 from tg_video_downloader.licensing import create_license_gate as release_gate_factory
 

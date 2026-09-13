@@ -1,4 +1,4 @@
-#define AppVersion "0.3.9"
+#define AppVersion "0.3.10"
 #ifndef AppBuildSource
   #define AppBuildSource "..\.tmp\windows-dist\TelegramVideoDownloader"
 #endif
