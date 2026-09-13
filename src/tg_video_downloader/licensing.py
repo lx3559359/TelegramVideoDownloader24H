@@ -24,6 +24,44 @@ class LicenseError(ValueError):
 
 
 def device_code() -> str:
+    system_root = os.environ.get('SystemRoot')
+    if not system_root:
+        raise LicenseError('找不到 Windows 系统目录，无法启动设备读取程序')
+    primary = Path(system_root) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    try:
+        return _read_device_with(primary)
+    except LicenseError as error:
+        failures = [f'Windows PowerShell：{error}']
+    for candidate in _powershell7_candidates():
+        try:
+            return _read_device_with(candidate)
+        except LicenseError as error:
+            failures.append(f'PowerShell 7：{error}')
+    if len(failures) == 1:
+        failures.append('未找到可用的 PowerShell 7 备用程序')
+    raise LicenseError('；'.join(failures)) from None
+
+
+def _powershell7_candidates() -> list[Path]:
+    """Only known installation locations, never current-directory/PATH lookup."""
+    candidates = []
+    for variable, relative in (
+        ('ProgramFiles', 'PowerShell/7/pwsh.exe'),
+        ('LOCALAPPDATA', 'Microsoft/WindowsApps/pwsh.exe'),
+    ):
+        base = os.environ.get(variable)
+        if not base or not Path(base).is_absolute():
+            continue
+        candidate = Path(base) / relative
+        try:
+            if candidate.is_file() and candidate not in candidates:
+                candidates.append(candidate)
+        except OSError:
+            continue
+    return candidates
+
+
+def _read_device_with(powershell: Path) -> str:
     command = (
         "$ErrorActionPreference='Stop';"
         "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);"
@@ -32,10 +70,6 @@ def device_code() -> str:
         "try {$b=(Get-CimInstance Win32_BIOS).SerialNumber} catch {$queryFailed=$true};"
         "@{uuid=$u;bios=$b;query_failed=$queryFailed}|ConvertTo-Json -Compress"
     )
-    system_root = os.environ.get('SystemRoot')
-    if not system_root:
-        raise LicenseError('找不到 Windows 系统目录，无法启动设备读取程序')
-    powershell = Path(system_root) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     for attempt in range(2):
         try:
             result = subprocess.run(

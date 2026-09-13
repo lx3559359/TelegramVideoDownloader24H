@@ -1,4 +1,4 @@
-Telegram 视频自动下载器 v0.3.10 · Windows x64 独立安装版
+Telegram 视频自动下载器 v0.3.11 · Windows x64 独立安装版
 
 本安装包已包含 Python、Tk 和所需依赖，不需要额外安装运行环境。
 支持 Windows 10 / 11 64 位。无需管理员权限，建议保留默认安装目录。
