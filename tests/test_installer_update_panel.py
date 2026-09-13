@@ -22,6 +22,19 @@ def test_initial_buttons(panel):
     assert panel.check_button.instate(['!disabled'])
     assert panel.install_button.instate(['disabled'])
     assert panel.cancel_button.instate(['disabled'])
+    assert panel.source_choice.get() == '自动（镜像优先）'
+
+
+def test_source_is_visible_and_locked_during_download(panel):
+    panel.state = 'downloading'
+    panel._buttons()
+    assert str(panel.source_select.cget('state')) == 'disabled'
+    panel.events.put(('source', '魔搭国内镜像', None))
+    panel.after_cancel(panel.after_id)
+    panel._poll()
+    assert '魔搭国内镜像' in panel.source_status.get()
+    panel._failed(ValueError('network'))
+    assert str(panel.source_select.cget('state')) == 'readonly'
 
 
 def test_check_result_enables_download(panel):

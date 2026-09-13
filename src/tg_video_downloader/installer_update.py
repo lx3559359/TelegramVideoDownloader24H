@@ -9,10 +9,12 @@ import re
 import shutil
 import subprocess
 import time
+from http.client import HTTPException
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from threading import Event
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from tg_video_downloader.paths import ProjectPaths
@@ -31,6 +33,17 @@ class DownloadCancelled(ValueError):
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ValueError('更新下载不允许重定向到其他地址，请稍后重试或访问官网')
+
+
+class MirrorRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urlsplit(newurl)
+        if (target.scheme != 'https' or target.hostname not in
+                {'www.modelscope.cn', 'cdn-lfs-cn-1.modelscope.cn'}
+                or target.username is not None or target.password is not None
+                or target.port not in (None, 443) or target.fragment):
+            raise ValueError('镜像重定向地址不在允许范围内')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -92,6 +105,7 @@ class InstallerUpdateManager:
         self.paths = paths
         self.current_version = current_version or version('telegram-video-downloader')
         self.opener = opener or build_opener(NoRedirect()).open
+        self.mirror_opener = opener or build_opener(MirrorRedirect()).open
         self.launcher = launcher
 
     def check(self) -> InstallerRelease | None:
@@ -106,7 +120,33 @@ class InstallerUpdateManager:
         release = parse_manifest(json.loads(body))
         return release if version_tuple(release.version) > version_tuple(self.current_version) else None
 
-    def download(self, release: InstallerRelease, cancel: Event, progress) -> DownloadedInstaller:
+    def download(self, release: InstallerRelease, cancel: Event, progress, *,
+                 source='auto', source_changed=lambda name: None) -> DownloadedInstaller:
+        self._validate_release(release)
+        if source not in ('auto', 'mirror', 'official'):
+            raise ValueError('未知更新源')
+        mirror = ('https://www.modelscope.cn/datasets/lx3559359/Windows-Tool-Releases/'
+                  f'resolve/master/v{release.version}/TelegramVideoDownloader-v{release.version}-Windows-x64-Setup.exe?view=false')
+        choices = [(mirror, self.mirror_opener, '魔搭国内镜像'),
+                   (release.url, self.opener, '官网')]
+        if source == 'mirror': choices = choices[:1]
+        if source == 'official': choices = choices[1:]
+        for index, (url, opener, label) in enumerate(choices):
+            if cancel.is_set():
+                raise DownloadCancelled('已取消下载')
+            source_changed(label)
+            progress(0, release.size)
+            try:
+                return self._download_from(release, cancel, progress, url, opener)
+            except DownloadCancelled:
+                raise
+            except (OSError, ValueError, HTTPException):
+                if cancel.is_set():
+                    raise DownloadCancelled('已取消下载') from None
+                if index == len(choices) - 1:
+                    raise
+
+    def _download_from(self, release, cancel, progress, url, opener) -> DownloadedInstaller:
         self._validate_release(release)
         if cancel.is_set():
             raise DownloadCancelled('已取消下载')
@@ -118,7 +158,7 @@ class InstallerUpdateManager:
         received = 0
         started = time.monotonic()
         try:
-            with self.opener(Request(release.url, headers={'Cache-Control': 'no-cache'}), timeout=20) as response, partial.open('xb') as output:
+            with opener(Request(url, headers={'Cache-Control': 'no-cache'}), timeout=20) as response, partial.open('xb') as output:
                 if response.status != 200:
                     raise ValueError('安装包下载响应异常')
                 while True:
@@ -126,7 +166,7 @@ class InstallerUpdateManager:
                         raise DownloadCancelled('已取消下载')
                     if time.monotonic() - started > 1800:
                         raise TimeoutError('安装包下载超过 30 分钟，请重试')
-                    block = response.read(64 * 1024)
+                    block = getattr(response, 'read1', response.read)(64 * 1024)
                     if not block:
                         break
                     received += len(block)

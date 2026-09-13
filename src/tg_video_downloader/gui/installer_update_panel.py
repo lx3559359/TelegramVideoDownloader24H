@@ -36,6 +36,12 @@ class InstallerUpdatePanel(ttk.Frame):
         self.cancel_button = ttk.Button(buttons, text='取消下载', command=self.cancel)
         self.cancel_button.pack(side='left')
         ttk.Button(buttons, text='打开官网', command=lambda: webbrowser.open(SITE)).pack(side='left', padx=8)
+        self.source_choice = tk.StringVar(value='自动（镜像优先）')
+        self.source_select = ttk.Combobox(buttons, textvariable=self.source_choice,
+            values=('自动（镜像优先）', '魔搭国内镜像', '官网'), state='readonly', width=19)
+        self.source_select.pack(side='left', padx=8)
+        self.source_status = tk.StringVar(value='更新源：自动（镜像优先）；切换源后从头下载并重新校验。')
+        ttk.Label(self, textvariable=self.source_status).grid(row=6, column=0, sticky='w')
         self.status = tk.StringVar(value='仅在手动检查时联网；更新会保留配置、授权和下载数据。')
         ttk.Label(self, textvariable=self.status, wraplength=750).grid(row=2, column=0, sticky='w')
         self.progress = ttk.Progressbar(self, maximum=100)
@@ -59,6 +65,7 @@ class InstallerUpdatePanel(ttk.Frame):
         self.install_button.state(['disabled' if busy or self.release is None else '!disabled'])
         self.install_button.configure(text='安装并重启' if self.downloaded else '下载更新')
         self.cancel_button.state(['!disabled' if self.state == 'downloading' else 'disabled'])
+        self.source_select.configure(state='disabled' if busy else 'readonly')
 
     def _run(self, operation, action):
         def worker():
@@ -88,8 +95,10 @@ class InstallerUpdatePanel(ttk.Frame):
             self.state = 'downloading'
             self.status.set('正在下载安装包，后台任务保持运行……')
             self._buttons()
+            source = {'自动（镜像优先）': 'auto', '魔搭国内镜像': 'mirror', '官网': 'official'}[self.source_choice.get()]
             self._run('download', lambda: self.manager.download(self.release, self.cancel_event,
-                lambda n,t: self.events.put(('progress', n, t))))
+                lambda n,t: self.events.put(('progress', n, t)), source=source,
+                source_changed=lambda name: self.events.put(('source', name, None))))
             return
         if self.controller.login_active:
             self.status.set('请先完成或取消当前登录任务，再安装更新。')
@@ -114,7 +123,9 @@ class InstallerUpdatePanel(ttk.Frame):
         try:
             while True:
                 kind, operation, value = self.events.get_nowait()
-                if kind == 'progress':
+                if kind == 'source':
+                    self.source_status.set(f'当前下载源：{operation}；若需手动换源，请先取消下载。')
+                elif kind == 'progress':
                     self.progress['value'] = operation / value * 100
                     self.status.set(f'下载安装包：{operation / 1024**2:.1f} / {value / 1024**2:.1f} MiB')
                 elif kind == 'error':
